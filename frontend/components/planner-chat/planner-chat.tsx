@@ -149,20 +149,22 @@ export function PlannerChat() {
           createdAt: Date.now(),
         },
       ]);
-      // Only drive the map for an actual plan — don't switch the view/filters
-      // for ordinary questions.
-      if (isPlan && planWeights) {
+      // Did the agent actually place stops in a specific area this turn?
+      const optStep =
+        agentRes.status === "fulfilled"
+          ? agentRes.value.steps.find((s) => s.tool === "optimize_layout")
+          : undefined;
+      const optSteps = (optStep?.result as { steps?: OptStep[] } | undefined)?.steps;
+      const agentPlacedStops = !!(optSteps && optSteps.length > 0);
+
+      // Drive the map. If the agent placed stops in a named area, THAT result is
+      // authoritative: show it (the map animates them in and flies to them) and do
+      // NOT emit applyPlan — applyPlan makes the control panel auto-run a city-wide
+      // budget-8 re-solve that scatters unrelated stops and stomps this one.
+      if (agentPlacedStops) {
+        emitMapCommand({ type: "optimizerResult", steps: optSteps! });
+      } else if (isPlan && planWeights) {
         emitMapCommand({ type: "applyPlan", weights: planWeights, goal: text });
-      }
-      // Plot the agent's recommended stops on the map. optimize_layout returns the
-      // same per-step trajectory the planner's optimizer does, so the map animates
-      // the new stops landing (and flies to them) — this is how you SEE them.
-      if (agentRes.status === "fulfilled") {
-        const optStep = agentRes.value.steps.find((s) => s.tool === "optimize_layout");
-        const optSteps = (optStep?.result as { steps?: OptStep[] } | undefined)?.steps;
-        if (optSteps && optSteps.length > 0) {
-          emitMapCommand({ type: "optimizerResult", steps: optSteps });
-        }
       }
     } catch (err) {
       setMessages((prev) => [
