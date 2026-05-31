@@ -172,6 +172,80 @@ def _get_profile_metric(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Area-distributed rasterization: spread a per-neighbourhood value across the
+# grid cells that fall inside each neighbourhood polygon. This turns the coarse
+# 158-point census into a proper field, so large neighbourhoods occupy many cells
+# and gaps appear wherever a cell sits far from existing service.
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=8)
+def _cell_neighbourhood_assignment(
+    west: float, south: float, east: float, north: float, N: int
+) -> pd.Series:
+    """For an N×N grid over the bbox, return the containing neighbourhood AREA_NAME
+    per cell (NaN if outside the city), indexed in grid[lat_row, lon_col] order.
+    """
+    lons = np.linspace(west, east, N + 1)
+    lats = np.linspace(south, north, N + 1)
+    lon_c = 0.5 * (lons[:-1] + lons[1:])
+    lat_c = 0.5 * (lats[:-1] + lats[1:])
+    lon_mesh, lat_mesh = np.meshgrid(lon_c, lat_c)  # grid[lat, lon] order
+    pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(lon_mesh.ravel(), lat_mesh.ravel()),
+        crs="EPSG:4326",
+    )
+    nbhd = _load_neighbourhoods()[["AREA_NAME", "geometry"]]
+    joined = gpd.sjoin(pts, nbhd, how="left", predicate="within")
+    # A cell on a shared border can match >1 polygon; keep the first match.
+    joined = joined[~joined.index.duplicated(keep="first")].sort_index()
+    return joined["AREA_NAME"].reset_index(drop=True)
+
+
+def _nbhd_value_map(metric_exact: str, scale: float = 1.0) -> dict[str, float]:
+    """Map neighbourhood name → profile metric value (× scale)."""
+    prof = _load_neighbourhood_profiles()
+    row = prof[prof["Neighbourhood Name"].str.strip() == metric_exact]
+    out: dict[str, float] = {}
+    if row.empty:
+        return out
+    r = row.iloc[0]
+    for col in prof.columns:
+        if col == "Neighbourhood Name":
+            continue
+        try:
+            out[col] = float(r[col]) * scale
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _area_distributed_grid(
+    bbox: BBox, N: int, metric_exact: str, *, density: bool, scale: float = 1.0
+) -> np.ndarray:
+    """Rasterize a per-neighbourhood metric over the grid.
+
+    density=True spreads a total (e.g. population) evenly across the cells of each
+    neighbourhood (so the grid sums to ≈ the city total); density=False assigns the
+    value as-is to every cell of the neighbourhood (e.g. a low-income *fraction*).
+    """
+    names = _cell_neighbourhood_assignment(
+        bbox.west, bbox.south, bbox.east, bbox.north, N
+    )
+    value_map = _nbhd_value_map(metric_exact, scale=scale)
+    counts = names.value_counts()  # cells per neighbourhood (NaN excluded)
+
+    def _cell(nm: object) -> float:
+        if not isinstance(nm, str) or nm not in value_map:
+            return 0.0
+        v = value_map[nm]
+        return v / counts[nm] if density else v
+
+    flat = names.map(_cell).to_numpy(dtype=float)
+    return flat.reshape(N, N)
+
+
 # ===========================================================================
 # Tool: get_city_grid
 # ===========================================================================
@@ -185,7 +259,7 @@ class GetCityGridArgs(BaseModel):
         description="Area to rasterize. None = whole Toronto extent.",
     )
     channels: list[
-        Literal["population", "stops", "income", "destinations", "network", "boundary"]
+        Literal["population", "stops", "income", "need", "destinations", "network", "boundary"]
     ] = Field(
         default=["population", "stops"],
         description="Grid channels to include in the output tensor.",
@@ -253,42 +327,16 @@ def get_city_grid(args: GetCityGridArgs) -> dict:
             # across the full city grid for sub-second performance on the DGX Spark.
 
         elif channel == "population":
-            # Bin neighbourhood centroids weighted by population
-            centroids = _neighbourhood_centroids_wgs84()
-            prof = _load_neighbourhood_profiles()
-            in_bbox = centroids[
-                (centroids["centroid_lon"] >= bbox.west)
-                & (centroids["centroid_lon"] <= bbox.east)
-                & (centroids["centroid_lat"] >= bbox.south)
-                & (centroids["centroid_lat"] <= bbox.north)
-            ]
-            pop_row = prof[
-                prof["Neighbourhood Name"].str.strip()
-                == "Total - Age groups of the population - 25% sample data"
-            ]
-            for _, row in in_bbox.iterrows():
-                nb_name = row["AREA_NAME"]
-                pop = None
-                if not pop_row.empty and nb_name in prof.columns:
-                    try:
-                        pop = float(pop_row.iloc[0][nb_name])
-                    except (TypeError, ValueError):
-                        pop = 0.0
-                if pop is None:
-                    pop = 0.0
-                lo_idx = int(
-                    np.clip(
-                        np.searchsorted(lons[1:], row["centroid_lon"]), 0, N - 1
-                    )
-                )
-                la_idx = int(
-                    np.clip(
-                        np.searchsorted(lats[1:], row["centroid_lat"]), 0, N - 1
-                    )
-                )
-                grid[la_idx, lo_idx] += pop
+            # Spread each neighbourhood's population evenly across the grid cells
+            # inside its polygon → a population *field*, not 158 centroid spikes.
+            grid = _area_distributed_grid(
+                bbox,
+                N,
+                "Total - Age groups of the population - 25% sample data",
+                density=True,
+            )
             # TODO(spark): use cuSpatial spatial join + cuDF groupby for whole-city
-            # rasterization in GPU memory.
+            # rasterization in GPU memory; swap to census-DA population for detail.
 
         elif channel == "income":
             # Bin neighbourhood centroids weighted by median household income
@@ -326,6 +374,21 @@ def get_city_grid(args: GetCityGridArgs) -> dict:
                 )
                 grid[la_idx, lo_idx] = income
             # TODO(spark): load income raster from GPU-resident census tile store.
+
+        elif channel == "need":
+            # Low-income prevalence as a fraction in [0, 1], assigned to every cell
+            # in each neighbourhood — the equity "need" signal the optimizer's
+            # reward weights underserved residents by.
+            grid = _area_distributed_grid(
+                bbox,
+                N,
+                "Prevalence of low income based on the Low-income measure, after tax (LIM-AT) (%)",
+                density=False,
+                scale=1.0 / 100.0,
+            )
+            grid = np.clip(grid, 0.0, 1.0)
+            # TODO(spark): blend ON-Marg material-deprivation + NIA flags into the
+            # need signal (loaders exist in diagnostics.py); GPU raster via cuSpatial.
 
         elif channel in ("destinations", "network", "boundary"):
             # Stub channels — placeholder zeros.
