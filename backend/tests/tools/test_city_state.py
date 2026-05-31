@@ -150,6 +150,24 @@ class TestGetCityGrid:
         for ch in channels:
             assert ch in result["grid"]
 
+    def test_need_channel_is_fraction_in_unit_interval(self):
+        args = GetCityGridArgs(channels=["need"], resolution=20)
+        result = get_city_grid(args)
+        grid = result["grid"]["need"]
+        vals = [c for row in grid for c in row]
+        assert any(v > 0 for v in vals), "need channel should have populated cells"
+        for v in vals:
+            assert 0.0 <= v <= 1.0, f"need value {v} out of [0,1]"
+
+    def test_population_channel_spreads_over_area(self):
+        """Area distribution: a neighbourhood occupies many cells, so a whole-city
+        grid has more than 158 populated cells."""
+        args = GetCityGridArgs(channels=["population"], resolution=40)
+        result = get_city_grid(args)
+        grid = result["grid"]["population"]
+        nonzero = sum(1 for row in grid for c in row if c > 0)
+        assert nonzero > 158
+
     def test_stub_channels_return_zero_grid(self):
         """destinations/network/boundary are stubs and should return all-zero grids."""
         args = GetCityGridArgs(

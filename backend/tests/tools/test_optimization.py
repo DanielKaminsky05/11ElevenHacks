@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import app.tools.optimization as optimization
 from app.tools.optimization import (
     OptimizationStatusArgs,
     OptimizeLayoutArgs,
@@ -22,6 +23,9 @@ from app.tools.optimization import (
     _JOBS,
     _GRID_COLS,
     _GRID_ROWS,
+    _greedy_search,
+    _load_grid_features,
+    _logical_candidate_cells,
     _reward,
     _greedy_place,
     optimize_layout,
@@ -489,3 +493,158 @@ class TestOptimizationStatus:
 
         status = optimization_status(OptimizationStatusArgs(job_id=job_id))
         assert abs(status["final_reward"] - opt_result["final_reward"]) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Grounded reward & optimizer behaviour (docs/reward-and-optimizer.md)
+# ---------------------------------------------------------------------------
+
+
+class TestGroundedReward:
+    def test_duplicate_stop_adds_no_coverage(self):
+        """Gained access saturates: a second stop on the same cell adds nothing —
+        access is a max over stops, never a sum (no double-counting)."""
+        spec = RewardSpec(
+            coverage_weight=1.0, travel_weight=0.0, equity_weight=0.0,
+            constraint_weight=0.0, region="Toronto", budget=2,
+        )
+        feats = _load_grid_features()
+        cell = feats.candidates[0]
+        one = _reward([cell], spec, feats)
+        dup = _reward([cell, cell], spec, feats)
+        assert abs(one - dup) < 1e-9
+
+    def test_more_stops_never_lowers_coverage(self):
+        """On a coverage-only goal, adding a stop never decreases the reward."""
+        spec = RewardSpec(
+            coverage_weight=1.0, travel_weight=0.0, equity_weight=0.0,
+            constraint_weight=0.0, region="Toronto", budget=3,
+        )
+        feats = _load_grid_features()
+        c0, c1 = feats.candidates[0], feats.candidates[1]
+        assert _reward([c0, c1], spec, feats) >= _reward([c0], spec, feats) - 1e-9
+
+    def test_channel_scores_in_unit_interval(self):
+        spec = RewardSpec(**_valid_spec_dict(budget=5))
+        result = optimize_layout(OptimizeLayoutArgs(reward_spec=spec.model_dump(), seed=1))
+        for k, v in result["channel_scores"].items():
+            assert 0.0 <= v <= 1.0, f"channel {k}={v} out of [0,1]"
+
+
+class TestEquityShift:
+    """The headline: weighting equity moves stops toward higher-need areas."""
+
+    def _run(self, **weights):
+        spec = _valid_spec_dict(
+            budget=8, coverage_weight=0.0, travel_weight=0.0,
+            equity_weight=0.0, constraint_weight=0.0, region="Toronto",
+        )
+        spec.update(weights)
+        return optimize_layout(OptimizeLayoutArgs(reward_spec=spec, seed=42))
+
+    def test_equity_goal_differs_from_coverage_goal(self):
+        cov = self._run(coverage_weight=1.0)
+        eq = self._run(equity_weight=1.0)
+        cov_cells = {(s["row"], s["col"]) for s in cov["stop_cells"]}
+        eq_cells = {(s["row"], s["col"]) for s in eq["stop_cells"]}
+        assert cov_cells != eq_cells, "equity and coverage goals should place differently"
+
+    def test_equity_goal_captures_more_equity(self):
+        cov = self._run(coverage_weight=1.0)
+        eq = self._run(equity_weight=1.0)
+        # The equity-optimised layout must score at least as well on equity as the
+        # coverage-optimised one does.
+        assert eq["channel_scores"]["equity"] >= cov["channel_scores"]["equity"] - 1e-9
+
+
+class TestNoDegenerateClustering:
+    def test_pure_equity_does_not_stack_one_cell(self):
+        spec = _valid_spec_dict(
+            budget=6, coverage_weight=0.0, travel_weight=0.0,
+            equity_weight=1.0, constraint_weight=0.0, region="Toronto",
+        )
+        result = optimize_layout(OptimizeLayoutArgs(reward_spec=spec, seed=42))
+        cells = [(s["row"], s["col"]) for s in result["stop_cells"]]
+        # Distinct cells, and spread across the city (not piled in one spot).
+        assert len(set(cells)) == len(cells)
+        if len(cells) >= 2:
+            span = (max(r for r, _ in cells) - min(r for r, _ in cells)) + (
+                max(c for _, c in cells) - min(c for _, c in cells)
+            )
+            assert span > 2, f"stops are clustered, span={span}"
+
+
+class TestGreedyVsRandom:
+    def test_greedy_beats_random_layout(self):
+        import random as _random
+
+        spec = RewardSpec(
+            coverage_weight=1.0, travel_weight=0.0, equity_weight=0.0,
+            constraint_weight=0.0, region="Toronto", budget=6,
+        )
+        feats = _load_grid_features()
+        placed, _steps, _reason = _greedy_search(spec, 42, feats)
+        greedy_r = _reward(placed, spec, feats)
+
+        rng = _random.Random(0)
+        rand_cells = rng.sample(list(feats.candidates), len(placed))
+        random_r = _reward(rand_cells, spec, feats)
+        assert greedy_r >= random_r
+
+
+class TestPerStopPenalty:
+    def test_higher_lambda_places_fewer_stops(self):
+        spec = _valid_spec_dict(budget=10)
+        orig = optimization._LAMBDA_STOP_COST
+        try:
+            optimization._LAMBDA_STOP_COST = 0.0
+            n_free = len(optimize_layout(OptimizeLayoutArgs(reward_spec=spec, seed=2))["stop_cells"])
+            optimization._LAMBDA_STOP_COST = 0.1
+            penalised = optimize_layout(OptimizeLayoutArgs(reward_spec=spec, seed=2))
+        finally:
+            optimization._LAMBDA_STOP_COST = orig
+        n_pen = len(penalised["stop_cells"])
+        assert n_pen <= n_free
+        assert n_pen < 10, "a stiff per-stop cost should prune the budget"
+        assert penalised["stopped_reason"] == "diminishing_returns"
+
+    def test_budget_is_an_upper_bound(self):
+        spec = _valid_spec_dict(budget=6)
+        result = optimize_layout(OptimizeLayoutArgs(reward_spec=spec, seed=1))
+        assert len(result["stop_cells"]) <= 6
+        assert result["stopped_reason"] in ("budget", "diminishing_returns")
+
+
+class TestLogicalLocations:
+    def test_candidate_set_is_strict_subset_of_grid(self):
+        cands = _logical_candidate_cells()
+        assert 0 < len(cands) < _GRID_ROWS * _GRID_COLS
+
+    def test_every_placed_stop_is_a_logical_site(self):
+        spec = _valid_spec_dict(budget=6)
+        result = optimize_layout(OptimizeLayoutArgs(reward_spec=spec, seed=3))
+        cands = set(_logical_candidate_cells())
+        for s in result["stop_cells"]:
+            assert (s["row"], s["col"]) in cands
+
+
+class TestTrainingStream:
+    def test_stream_emits_steps_then_done(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws/training") as ws:
+                assert ws.receive_json()["type"] == "connected"
+                ws.send_text(
+                    json.dumps({"reward_spec": _valid_spec_dict(budget=3), "seed": 1})
+                )
+                types = []
+                for _ in range(100):
+                    msg = ws.receive_json()
+                    types.append(msg["type"])
+                    if msg["type"] == "done":
+                        break
+                assert "step" in types
+                assert types[-1] == "done"

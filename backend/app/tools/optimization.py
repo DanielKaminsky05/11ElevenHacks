@@ -4,9 +4,17 @@ Tools that let the machine search: parse_goal, optimize_layout,
 propose_candidates, optimization_status. Register each with `@tool` from
 app.tools.registry.
 
-NOTE: the heavy RL core (optimize_layout) needs the GPU/SB3 stack on the Spark.
-A deterministic CPU greedy/hill-climbing fallback is implemented here so tests
-and demos run on a laptop. See # TODO(spark) comments.
+The optimizer is **greedy + local search**, not RL: stop placement is a maximal
+covering / p-median problem whose coverage objective is monotone submodular, so
+greedy is provably within (1 - 1/e) of optimal, deterministic, and fast enough to
+re-solve interactively when the planner changes weights. See
+docs/reward-and-optimizer.md.
+
+The reward is grounded in real per-cell data (population, low-income "need",
+existing-network access) pulled from get_city_grid, and credits only *new* access
+(gravity decay), so the optimizer closes gaps instead of piling onto already-
+served areas. Reward eval is the bottleneck and is embarrassingly parallel — see
+# TODO(spark) for the cuSpatial/cuOpt GPU path.
 
 Owned by one tool-builder agent. See .claude/agents/tool-builder.md.
 """
@@ -18,12 +26,23 @@ import math
 import random
 import time
 import uuid
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+import numpy as np
+from pydantic import BaseModel, Field, model_validator
+from shapely.geometry import Point
+from shapely.ops import unary_union
 
 from app.agent.nim_client import get_nim_client
+from app.tools.city_state import (
+    GetCityGridArgs,
+    _load_neighbourhoods,
+    get_city_grid,
+)
 from app.tools.registry import tool
+from app.tools.simulation import _load_route_shapes
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +104,11 @@ _JOBS: dict[str, dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Grid + tuning constants
 # ---------------------------------------------------------------------------
 
+# Coarse candidate grid: where a stop *can* be placed. Outputs map to lon/lat
+# via _cell_to_lonlat. Kept stable so lon/lat outputs are reproducible.
 _TORONTO_GRID_BOUNDS = {
     "lon_min": -79.6393,
     "lon_max": -79.1167,
@@ -97,9 +118,43 @@ _TORONTO_GRID_BOUNDS = {
 _GRID_COLS = 20
 _GRID_ROWS = 15
 
+# Metres per degree at Toronto's latitude (matches diagnostics/simulation).
+_M_PER_DEG_LAT = 111_139.0
+_M_PER_DEG_LON = 111_139.0 * math.cos(math.radians(43.7))
+
+# Demand grid resolution sampled from get_city_grid for the per-cell features.
+# ~60 → ~750 m cells, fine enough that a stop's ~400 m walkshed is representable
+# and suburban interiors far from arterial stops register as gaps.
+_DEMAND_RESOLUTION = 60
+
+# Gravity walk-access scale (metres): a stop's contribution to a cell's access
+# fades with walk distance. ~400 m is the real walk-to-transit scale.
+_D0_M = 400.0
+
+# Per-stop cost λ: every extra stop must earn more than this marginal reward gain
+# or greedy stops adding. Makes parsimony intrinsic, not just a hard budget cap.
+# This is the knob to "play with" — λ=0 fills to budget; larger λ → fewer stops.
+# In "% of the budget-achievable best" units: a stop must add more than ~2% of
+# what the budget could ideally capture, or greedy stops adding it.
+_LAMBDA_STOP_COST = 0.02
+
+# Minimum spacing (metres) between *new* stops before the constraint term docks
+# them. New-vs-existing redundancy is handled by gained-access saturation, not
+# here — so legitimate transfer points (crossing routes) are never penalised.
+_NEW_STOP_MIN_SPACING_M = 150.0
+
+# A candidate cell is a "logical" stop site only if within this distance of an
+# existing route line (on the street/transit network, not a ravine or rail yard).
+_CANDIDATE_MAX_ROUTE_DIST_M = 700.0
+
+# Fallback nearest-stop distance (metres) for cells with no existing stop nearby.
+_NO_STOP_NEAREST_M = 10_000.0
+
+_EPS = 1e-12
+
 
 def _grid_cells() -> list[tuple[int, int]]:
-    """Return all (row, col) indices of the coarse evaluation grid."""
+    """Return all (row, col) indices of the coarse candidate grid."""
     return [(r, c) for r in range(_GRID_ROWS) for c in range(_GRID_COLS)]
 
 
@@ -119,101 +174,388 @@ def _cell_to_lonlat(row: int, col: int) -> tuple[float, float]:
     return lon, lat
 
 
-def _reward(stops: list[tuple[int, int]], spec: RewardSpec) -> float:
-    """Deterministic CPU reward approximation for a stop layout.
+# ---------------------------------------------------------------------------
+# Logical-location candidate filter
+# ---------------------------------------------------------------------------
 
-    Coverage   — fraction of grid cells within 2 grid-units of a stop.
-    Travel     — inverse mean distance from each cell to its nearest stop.
-    Equity     — fraction of high-equity-need cells covered (approximated by
-                  cells in the lower-income quadrant of the grid, i.e. rows > half).
-    Constraint — penalty for stops placed too close together (<= 1 grid unit apart).
 
-    All terms normalised to [0, 1].
+@lru_cache(maxsize=1)
+def _land_union():
+    """Union of the Neighbourhoods-158 polygons — the 'on land / in city' mask."""
+    gdf = _load_neighbourhoods()
+    return unary_union(list(gdf.geometry.values))
+
+
+@lru_cache(maxsize=1)
+def _logical_candidate_cells() -> tuple[tuple[int, int], ...]:
+    """Candidate cells filtered to plausible stop sites: on land (inside a Toronto
+    neighbourhood) and near the existing street/route network. Drops water,
+    ravines, rail yards, and out-of-city cells.
+
+    # TODO: upgrade the network test to the Pedestrian Network + Centreline layers
+    # (both already in data/geospatial/) for finer walkability.
     """
-    if not stops:
-        return 0.0
+    land = _land_union()
+    try:
+        routes = _load_route_shapes("ttc-routes-schedules-gtfs")
+    except FileNotFoundError:
+        routes = None
+    max_route_deg = _CANDIDATE_MAX_ROUTE_DIST_M / _M_PER_DEG_LAT
+    has_routes = routes is not None and len(getattr(routes, "geoms", [])) > 0
 
-    cells = _grid_cells()
-    covered = 0
-    equity_covered = 0
-    equity_cells = [c for c in cells if c[0] >= _GRID_ROWS // 2]  # southern half proxy
-    total_dist = 0.0
+    out: list[tuple[int, int]] = []
+    for r, c in _grid_cells():
+        lon, lat = _cell_to_lonlat(r, c)
+        pt = Point(lon, lat)
+        if not land.contains(pt):
+            continue
+        if has_routes and routes.distance(pt) > max_route_deg:
+            continue
+        out.append((r, c))
+    return tuple(out)
 
-    for cell in cells:
-        dists = [math.hypot(cell[0] - s[0], cell[1] - s[1]) for s in stops]
-        min_dist = min(dists)
-        covered += 1 if min_dist <= 2.0 else 0
-        total_dist += min_dist
 
-    for cell in equity_cells:
-        dists = [math.hypot(cell[0] - s[0], cell[1] - s[1]) for s in stops]
-        equity_covered += 1 if min(dists) <= 2.0 else 0
+# ---------------------------------------------------------------------------
+# Per-cell demand features (grounded in real data)
+# ---------------------------------------------------------------------------
 
-    n = len(cells)
-    coverage_score = covered / n
-    # travel: max possible mean dist is roughly sqrt(R²+C²)/2; normalise to [0,1]
-    max_mean = math.hypot(_GRID_ROWS, _GRID_COLS) / 2
-    travel_score = 1.0 - min(total_dist / n / max_mean, 1.0)
-    equity_score = equity_covered / max(len(equity_cells), 1)
 
-    # Constraint penalty: fraction of stop-pairs that are too close
-    n_stops = len(stops)
-    n_pairs = n_stops * (n_stops - 1) / 2 if n_stops > 1 else 1
-    too_close = sum(
-        1
-        for i in range(n_stops)
-        for j in range(i + 1, n_stops)
-        if math.hypot(stops[i][0] - stops[j][0], stops[i][1] - stops[j][1]) <= 1.0
+@dataclass(frozen=True)
+class _GridFeatures:
+    """Per-demand-cell features + fixed reference points for one optimisation.
+
+    All arrays are aligned and cover demand cells with population > 0. Reward
+    stays a pure function of (layout, spec, this struct) — the I/O happens here,
+    once, cached.
+    """
+
+    demand_lon: np.ndarray  # (D,)
+    demand_lat: np.ndarray  # (D,)
+    pop: np.ndarray         # (D,) people
+    need: np.ndarray        # (D,) low-income share, in [0, 1]
+    access0: np.ndarray     # (D,) gravity access from the EXISTING network, [0,1]
+    nearest0: np.ndarray    # (D,) metres to nearest existing stop
+    pop_sum: float
+    needpop_sum: float
+    burden0: float          # do-nothing person-weighted walk burden (metre·people)
+    # Descending cumulative sums of per-cell "instant gains" (value if a stop
+    # landed on that cell). cumsum[k-1] = the best a budget of k stops could do,
+    # ignoring overlap — an optimistic upper bound used to normalise each channel
+    # to "% of the budget-achievable best". Fixed per goal.
+    cov_cumsum: np.ndarray
+    eq_cumsum: np.ndarray
+    travel_cumsum: np.ndarray
+    candidates: tuple[tuple[int, int], ...]
+
+
+@lru_cache(maxsize=4)
+def _load_grid_features(resolution: int = _DEMAND_RESOLUTION) -> _GridFeatures:
+    """Build (and cache) the per-cell demand features from get_city_grid.
+
+    City-wide demand. NOTE: spec.region is recorded in the output but not yet used
+    to mask demand — the population channel is neighbourhood-coarse, so a sub-city
+    bbox is too sparse to be useful. # TODO: spatial region masking once a finer
+    population raster (census DA) is wired in.
+    """
+    g = get_city_grid(
+        GetCityGridArgs(
+            bbox=None, channels=["population", "need", "stops"], resolution=resolution
+        )
     )
-    constraint_score = 1.0 - (too_close / n_pairs if n_pairs > 0 else 0.0)
+    pop = np.asarray(g["grid"]["population"], dtype=float).ravel()
+    need = np.asarray(g["grid"]["need"], dtype=float).ravel()
+    stops_grid = np.asarray(g["grid"]["stops"], dtype=float).ravel()
 
+    lon_c = np.asarray(g["lon_centres"], dtype=float)
+    lat_c = np.asarray(g["lat_centres"], dtype=float)
+    lon_mesh, lat_mesh = np.meshgrid(lon_c, lat_c)  # grid[row=lat, col=lon] order
+    demand_lon = lon_mesh.ravel()
+    demand_lat = lat_mesh.ravel()
+
+    # Existing-network access0 / nearest0: each cell holding existing stops is a
+    # source at its own centre. Gravity access uses the nearest source (max over
+    # sources) so cells near many stops don't accrue unbounded credit — and so a
+    # cell more than a walkshed from any stop reads as a genuine gap.
+    src = stops_grid > 0
+    if src.any():
+        sx = demand_lon[src]
+        sy = demand_lat[src]
+        dx = (demand_lon[:, None] - sx[None, :]) * _M_PER_DEG_LON
+        dy = (demand_lat[:, None] - sy[None, :]) * _M_PER_DEG_LAT
+        dist = np.sqrt(dx * dx + dy * dy)
+        nearest0 = dist.min(axis=1)
+        access0 = np.exp(-nearest0 / _D0_M)
+    else:
+        nearest0 = np.full_like(demand_lon, _NO_STOP_NEAREST_M)
+        access0 = np.zeros_like(demand_lon)
+
+    # Keep only populated cells — unpopulated cells contribute nothing and slow
+    # the reward down.
+    keep = pop > 0
+    pop = pop[keep]
+    need = need[keep]
+    access0 = access0[keep]
+    nearest0 = nearest0[keep]
+    demand_lon = demand_lon[keep]
+    demand_lat = demand_lat[keep]
+
+    pop_sum = float(pop.sum())
+    needpop = need * pop
+    needpop_sum = float(needpop.sum())
+    burden0 = float((pop * nearest0).sum())
+
+    # Per-cell instant gains (value if a stop landed exactly on that cell):
+    #   coverage gain = pop · (unserved fraction); equity = need · that;
+    #   travel = pop · (metres removed ≈ its whole nearest-stop distance).
+    unserved = 1.0 - access0
+    cov_cumsum = np.cumsum(np.sort(pop * unserved)[::-1])
+    eq_cumsum = np.cumsum(np.sort(need * pop * unserved)[::-1])
+    travel_cumsum = np.cumsum(np.sort(pop * nearest0)[::-1])
+
+    return _GridFeatures(
+        demand_lon=demand_lon,
+        demand_lat=demand_lat,
+        pop=pop,
+        need=need,
+        access0=access0,
+        nearest0=nearest0,
+        pop_sum=pop_sum,
+        needpop_sum=needpop_sum,
+        burden0=burden0,
+        cov_cumsum=cov_cumsum,
+        eq_cumsum=eq_cumsum,
+        travel_cumsum=travel_cumsum,
+        candidates=_logical_candidate_cells(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reward function (pure: function of layout, spec, and per-cell features)
+# ---------------------------------------------------------------------------
+
+
+def _ratio(value: float, ideal: float) -> float:
+    """Fraction of the achievable improvement captured (do_nothing baseline = 0).
+
+    When there is no opportunity (ideal ≈ 0), the layout has nothing to improve,
+    so it trivially captures all of it → 1.0. Otherwise clamp value/ideal to [0,1].
+    """
+    if ideal <= _EPS:
+        return 1.0
+    return float(min(max(value / ideal, 0.0), 1.0))
+
+
+def _ideal_b(cumsum: np.ndarray, budget: int) -> float:
+    """Best a budget of `budget` stops could capture (top-`budget` instant gains)."""
+    if cumsum.size == 0:
+        return 0.0
+    return float(cumsum[min(budget, cumsum.size) - 1])
+
+
+def _spacing_penalty(stops: list[tuple[int, int]]) -> float:
+    """Fraction of *new-stop* pairs closer than the minimum spacing.
+
+    Applies only among the new stops in the layout — never new-vs-existing, which
+    is handled by gained-access saturation. So transfer points are not punished.
+    """
+    n = len(stops)
+    if n < 2:
+        return 0.0
+    pts = [_cell_to_lonlat(r, c) for r, c in stops]
+    too_close = 0
+    pairs = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            pairs += 1
+            dx = (pts[i][0] - pts[j][0]) * _M_PER_DEG_LON
+            dy = (pts[i][1] - pts[j][1]) * _M_PER_DEG_LAT
+            if math.hypot(dx, dy) < _NEW_STOP_MIN_SPACING_M:
+                too_close += 1
+    return too_close / pairs if pairs else 0.0
+
+
+def _score_layout(
+    stops: list[tuple[int, int]], spec: RewardSpec, feats: _GridFeatures
+) -> tuple[float, dict[str, float]]:
+    """Return (R, channel_scores) for a layout. Pure; no I/O.
+
+    Channels (each a "% of the budget-achievable best", in [0, 1]):
+      coverage   — share of *population* given NEW access
+      equity     — same, weighted by need (low-income share)
+      travel     — reduction in person-weighted walk burden
+      constraint — feasibility: 1 − spacing penalty (new stops only)
+    """
     total_w = (
         spec.coverage_weight
         + spec.travel_weight
         + spec.equity_weight
         + spec.constraint_weight
     )
-    if total_w == 0:
-        return 0.0
-    return (
-        spec.coverage_weight * coverage_score
-        + spec.travel_weight * travel_score
-        + spec.equity_weight * equity_score
-        + spec.constraint_weight * constraint_score
+    if total_w <= 0:
+        return 0.0, {"coverage": 0.0, "equity": 0.0, "travel": 0.0, "constraint": 1.0}
+
+    if not stops:
+        # do-nothing baseline: zero gained access, zero burden reduction.
+        return 0.0, {"coverage": 0.0, "equity": 0.0, "travel": 0.0, "constraint": 1.0}
+
+    slon = np.array([_cell_to_lonlat(r, c)[0] for r, c in stops])
+    slat = np.array([_cell_to_lonlat(r, c)[1] for r, c in stops])
+    dx = (feats.demand_lon[:, None] - slon[None, :]) * _M_PER_DEG_LON
+    dy = (feats.demand_lat[:, None] - slat[None, :]) * _M_PER_DEG_LAT
+    dist = np.sqrt(dx * dx + dy * dy)  # (D, S)
+
+    # Gravity access from the NEW stops; credit only access beyond the existing
+    # network (saturation → a stop near already-served demand earns ~0, a stop in a
+    # thinly served gap earns a lot).
+    access_new = np.exp(-dist / _D0_M).max(axis=1)
+    gained = np.maximum(0.0, access_new - feats.access0)
+
+    budget = spec.budget
+    cov_val = float((feats.pop * gained).sum())
+    eq_val = float((feats.need * feats.pop * gained).sum())
+
+    nearest_any = np.minimum(feats.nearest0, dist.min(axis=1))
+    burden_removed = float((feats.pop * (feats.nearest0 - nearest_any)).sum())
+
+    # Each channel: % of what `budget` stops could best achieve.
+    coverage = _ratio(cov_val, _ideal_b(feats.cov_cumsum, budget))
+    equity = _ratio(eq_val, _ideal_b(feats.eq_cumsum, budget))
+    travel = _ratio(burden_removed, _ideal_b(feats.travel_cumsum, budget))
+    constraint = 1.0 - _spacing_penalty(stops)
+
+    scores = {
+        "coverage": coverage,
+        "equity": equity,
+        "travel": travel,
+        "constraint": constraint,
+    }
+    r = (
+        spec.coverage_weight * coverage
+        + spec.travel_weight * travel
+        + spec.equity_weight * equity
+        + spec.constraint_weight * constraint
     ) / total_w
+    return float(min(max(r, 0.0), 1.0)), scores
 
 
-def _greedy_place(spec: RewardSpec, seed: int = 42) -> list[tuple[int, int]]:
-    """Greedy stop placement: iteratively add the cell that maximally increases
-    the weighted reward.
+def _reward(
+    stops: list[tuple[int, int]],
+    spec: RewardSpec,
+    feats: _GridFeatures | None = None,
+) -> float:
+    """Scalar reward for a layout. Pure when `feats` is supplied.
 
-    # TODO(spark): replace with SB3 PPO/DQN over a Gymnasium env; warm-start
-    #              candidates with cuOpt combinatorial placement.
+    `feats` defaults to the cached city-wide features for convenience (tests /
+    one-off calls); the optimiser always passes a struct so no reload happens in
+    the hot loop.
+    """
+    if feats is None:
+        feats = _load_grid_features()
+    return _score_layout(stops, spec, feats)[0]
+
+
+# ---------------------------------------------------------------------------
+# Greedy + local-search optimiser
+# ---------------------------------------------------------------------------
+
+
+def _stops_lonlat(cells: list[tuple[int, int]]) -> list[dict[str, float]]:
+    out = []
+    for r, c in cells:
+        lon, lat = _cell_to_lonlat(r, c)
+        out.append({"lon": float(lon), "lat": float(lat)})
+    return out
+
+
+def _greedy_search(
+    spec: RewardSpec, seed: int, feats: _GridFeatures
+) -> tuple[list[tuple[int, int]], list[dict[str, Any]], str]:
+    """Greedy-add (warm-started from the existing network via access0) then a
+    local-search swap pass. Returns (placed_cells, per_step_states, stopped_reason).
+
+    Each step state is {stops: [{lon, lat}], R, channel_scores} so the frontend can
+    animate the network being built and re-solve on weight change.
     """
     rng = random.Random(seed)
-    cells = _grid_cells()
-    rng.shuffle(cells)  # break ties randomly but deterministically
+    cands = list(feats.candidates)
+    rng.shuffle(cands)  # deterministic tie-break order
 
     placed: list[tuple[int, int]] = []
-    for _ in range(spec.budget):
+    cur_r, cur_scores = _score_layout(placed, spec, feats)
+    steps: list[dict[str, Any]] = [
+        {"stops": [], "R": cur_r, "channel_scores": cur_scores}
+    ]
+    stopped_reason = "budget"
+
+    # --- Greedy-add phase ---
+    while len(placed) < spec.budget:
         best_cell = None
-        best_r = _reward(placed, spec)
-        for cell in cells:
+        best_r = cur_r
+        for cell in cands:
             if cell in placed:
                 continue
-            candidate = placed + [cell]
-            r = _reward(candidate, spec)
-            if r > best_r:
+            r, _ = _score_layout(placed + [cell], spec, feats)
+            if r > best_r + _EPS:
                 best_r = r
                 best_cell = cell
-        if best_cell is None:
-            # No improvement possible; pick a random unplaced cell
-            remaining = [c for c in cells if c not in placed]
-            if not remaining:
-                break
-            best_cell = remaining[0]
+        # A stop earns its place only if its marginal gain beats the per-stop cost.
+        if best_cell is None or (best_r - cur_r) <= _LAMBDA_STOP_COST:
+            stopped_reason = "diminishing_returns"
+            break
         placed.append(best_cell)
+        cur_r, cur_scores = _score_layout(placed, spec, feats)
+        steps.append(
+            {
+                "stops": _stops_lonlat(placed),
+                "R": cur_r,
+                "channel_scores": cur_scores,
+            }
+        )
 
+    # --- Local-search swap pass: relocate a placed stop if it strictly helps.
+    for _ in range(3):  # bounded passes; R strictly increases per accepted swap
+        improved = False
+        for idx in range(len(placed)):
+            best_swap = None
+            best_r = cur_r
+            for cell in cands:
+                if cell in placed:
+                    continue
+                trial = placed.copy()
+                trial[idx] = cell
+                r, _ = _score_layout(trial, spec, feats)
+                if r > best_r + _EPS:
+                    best_r = r
+                    best_swap = cell
+            if best_swap is not None:
+                placed[idx] = best_swap
+                cur_r, cur_scores = _score_layout(placed, spec, feats)
+                steps.append(
+                    {
+                        "stops": _stops_lonlat(placed),
+                        "R": cur_r,
+                        "channel_scores": cur_scores,
+                    }
+                )
+                improved = True
+        if not improved:
+            break
+
+    return placed, steps, stopped_reason
+
+
+def _greedy_place(
+    spec: RewardSpec, seed: int = 42, feats: _GridFeatures | None = None
+) -> list[tuple[int, int]]:
+    """Greedy stop placement returning the placed candidate cells.
+
+    # TODO(spark): vectorise the reward eval over all cells × candidates with
+    #              cuSpatial/cuDF, and solve the exact MCLP with cuOpt warm-started
+    #              from this greedy solution at full Toronto resolution.
+    """
+    if feats is None:
+        feats = _load_grid_features()
+    placed, _steps, _reason = _greedy_search(spec, seed, feats)
     return placed
 
 
@@ -303,16 +645,18 @@ class OptimizeLayoutArgs(BaseModel):
 def optimize_layout(args: OptimizeLayoutArgs) -> dict:
     """Discover the BEST stop layout for a goal the planner does NOT yet have a concrete plan for
     (e.g. "where should we add stops to help low-income areas"). Returns recommended stop
-    locations and the metric trajectory.
+    locations, per-step states, and the metric trajectory.
 
     Use when the planner asks "what should we do" / "where should stops go" / "find the best ...".
     Do NOT use to evaluate a specific proposed change — that is simulate_change. Requires a reward
     spec from parse_goal.
 
-    CPU fallback: deterministic greedy placement. GPU path uses SB3 PPO/DQN on the Spark.
+    Greedy add (warm-started from the existing network) + local-search swap pass.
+    May return fewer than `budget` stops when extra stops stop paying for
+    themselves (per-stop cost). Deterministic given the seed.
     """
-    # TODO(spark): replace CPU greedy with SB3 PPO/DQN over a Gymnasium city-grid env;
-    #              warm-start with cuOpt combinatorial placement; stream episodes via WebSocket.
+    # TODO(spark): vectorise the reward eval with cuSpatial/cuDF and solve the exact
+    #              MCLP with cuOpt warm-started from this greedy solution.
 
     try:
         spec = RewardSpec(**args.reward_spec)
@@ -322,39 +666,14 @@ def optimize_layout(args: OptimizeLayoutArgs) -> dict:
     job_id = str(uuid.uuid4())
     start = time.time()
 
-    # Greedy placement with trajectory recording
-    rng = random.Random(args.seed)
-    cells = _grid_cells()
-    rng.shuffle(cells)
+    feats = _load_grid_features()
+    placed, steps, stopped_reason = _greedy_search(spec, args.seed, feats)
 
-    placed: list[tuple[int, int]] = []
-    trajectory: list[float] = [_reward([], spec)]
-
-    for step in range(min(args.max_iterations, spec.budget)):
-        best_cell = None
-        best_r = trajectory[-1]
-        for cell in cells:
-            if cell in placed:
-                continue
-            candidate = placed + [cell]
-            r = _reward(candidate, spec)
-            if r > best_r:
-                best_r = r
-                best_cell = cell
-        if best_cell is None:
-            remaining = [c for c in cells if c not in placed]
-            if not remaining:
-                break
-            best_cell = remaining[0]
-        placed.append(best_cell)
-        trajectory.append(_reward(placed, spec))
-        if len(placed) >= spec.budget:
-            break
-
-    final_reward = trajectory[-1]
+    final_reward = steps[-1]["R"]
+    channel_scores = steps[-1]["channel_scores"]
+    trajectory = [float(s["R"]) for s in steps]
     elapsed = time.time() - start
 
-    # Convert to lon/lat for the output
     stop_lonlats = [_cell_to_lonlat(r, c) for r, c in placed]
 
     result = {
@@ -364,19 +683,24 @@ def optimize_layout(args: OptimizeLayoutArgs) -> dict:
         "stops": [{"lon": float(lon), "lat": float(lat)} for lon, lat in stop_lonlats],
         "stop_cells": [{"row": r, "col": c} for r, c in placed],
         "final_reward": float(final_reward),
-        "reward_trajectory": [float(v) for v in trajectory],
+        "channel_scores": channel_scores,
+        "reward_trajectory": trajectory,
+        "steps": steps,
+        "stopped_reason": stopped_reason,
+        "stop_cost": _LAMBDA_STOP_COST,
         "elapsed_s": float(round(elapsed, 3)),
-        "method": "cpu_greedy",  # TODO(spark): "sb3_ppo" on Spark
+        "method": "cpu_greedy",  # TODO(spark): "cuopt_mclp" on Spark
     }
 
-    # Store in job store for optimization_status queries
     _JOBS[job_id] = {
         "job_id": job_id,
         "status": "completed",
         "reward_trajectory": result["reward_trajectory"],
         "final_reward": final_reward,
+        "channel_scores": channel_scores,
         "region": spec.region,
         "stops": result["stops"],
+        "stopped_reason": stopped_reason,
         "elapsed_s": result["elapsed_s"],
     }
 
@@ -488,7 +812,9 @@ def optimization_status(args: OptimizationStatusArgs) -> dict:
         "status": job["status"],
         "reward_trajectory": job["reward_trajectory"],
         "final_reward": job.get("final_reward"),
+        "channel_scores": job.get("channel_scores"),
         "region": job.get("region"),
         "stops": job.get("stops", []),
+        "stopped_reason": job.get("stopped_reason"),
         "elapsed_s": job.get("elapsed_s"),
     }
