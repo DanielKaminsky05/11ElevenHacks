@@ -11,8 +11,11 @@ nothing else, so all five of us merge without conflicts.
    Do not touch the registry, the shell, other views, shared libs, or configs.
    If you think a shared file needs a change, STOP and note it in your final
    report instead of editing it.
-2. **Do not run `git` commands, do not commit, do not push.** The orchestrator
-   merges your work. Just leave your edited file in the working tree.
+2. You are working in a dedicated **git worktree on your own branch**. When your
+   file is done and verified, **commit ONLY your one view file** to your current
+   branch with a clear message, then **report your branch name and commit SHA**.
+   Do **not** push, do **not** merge, do **not** switch branches, do **not**
+   `git add` anything other than your single view file. The orchestrator merges.
 3. Keep the public API of your module identical to the stub: same `export const
    xView: ViewModule`, same `id`/`group`. You may change `label`, `description`,
    `options`, and the bodies of `setup`/`setOption`/`legend`, and you MUST push
