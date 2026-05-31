@@ -67,6 +67,52 @@ export const MAGNITUDE_COLOR: Record<Magnitude, string> = {
   severe: "#f87171",
 };
 
+/** True if the event is a closure/disruption (vs. a demand surge). */
+export function isClosure(e: CityEvent): boolean {
+  return e.kind === "supply_disruption";
+}
+
+/** Properties carried on each event map feature. */
+export interface EventFeatureProps {
+  id: string;
+  title: string;
+  category: EventCategory;
+  kind: EventKind;
+  magnitude: Magnitude;
+  color: string;
+  isClosure: boolean;
+  venueName: string;
+}
+
+/**
+ * GeoJSON point FeatureCollection of events that have venue coordinates, for the
+ * map's event markers. Diffuse events (no coords) are skipped.
+ */
+export function eventsToGeoJSON(events: CityEvent[]): GeoJSON.FeatureCollection<
+  GeoJSON.Point,
+  EventFeatureProps
+> {
+  const features: GeoJSON.Feature<GeoJSON.Point, EventFeatureProps>[] = [];
+  for (const e of events) {
+    if (e.venue.lat == null || e.venue.lon == null) continue;
+    features.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [e.venue.lon, e.venue.lat] },
+      properties: {
+        id: e.id,
+        title: e.title,
+        category: e.category,
+        kind: e.kind,
+        magnitude: e.impact.magnitude,
+        color: MAGNITUDE_COLOR[e.impact.magnitude],
+        isClosure: isClosure(e),
+        venueName: e.venue.name,
+      },
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
 // The mock catalogue is the 2026 World Cup era, so anchor the feed's window
 // there rather than the machine clock (which may sit outside that range and
 // return nothing). Swap to a live "today" once real feeds are wired in.

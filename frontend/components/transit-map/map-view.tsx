@@ -23,6 +23,7 @@ import {
 } from "@/lib/choropleth";
 import { subscribeMapCommand } from "@/lib/map-bus";
 import { planToMapAction } from "@/lib/planner-actions";
+import { loadEvents, eventsToGeoJSON } from "@/lib/events";
 import type { LayerKey, LegendState } from "./map-legend";
 import { ControlPanel } from "./control-panel";
 import { RouteDetails, type SelectedRoute } from "./route-details";
@@ -298,6 +299,92 @@ export function MapView() {
         console.warn("neighbourhood labels unavailable:", err);
       }
 
+      // City events (road/line closures + big draws). Closures are highlighted
+      // distinctly so disruptions stand out; clicking an alert card flies here.
+      try {
+        const res = await loadEvents();
+        if (!cancelled && !map.getSource("events")) {
+          map.addSource("events", { type: "geojson", data: eventsToGeoJSON(res.events) });
+
+          // Focus ring — a large halo under the marker, filtered to the event
+          // the user clicked in the alert feed (none by default).
+          map.addLayer({
+            id: "events-focus",
+            type: "circle",
+            source: "events",
+            filter: ["==", ["get", "id"], "__none__"],
+            paint: {
+              "circle-radius": 22,
+              "circle-color": ["get", "color"],
+              "circle-opacity": 0.18,
+              "circle-stroke-color": ["get", "color"],
+              "circle-stroke-width": 2,
+              "circle-stroke-opacity": 0.6,
+            },
+          });
+
+          // Demand surges (matches, festivals): soft filled dot in severity color.
+          map.addLayer({
+            id: "events-demand",
+            type: "circle",
+            source: "events",
+            filter: ["==", ["get", "isClosure"], false],
+            paint: {
+              "circle-radius": [
+                "interpolate", ["linear"], ["zoom"], 10, 5, 14, 9,
+              ] as ExpressionSpecification,
+              "circle-color": ["get", "color"],
+              "circle-opacity": 0.55,
+              "circle-stroke-color": "#0a1628",
+              "circle-stroke-width": 1.5,
+            },
+          });
+
+          // Closures (road/line disruptions): a bold hollow ring so they read
+          // as "blocked / no-go" and clearly differ from demand dots.
+          map.addLayer({
+            id: "events-closure",
+            type: "circle",
+            source: "events",
+            filter: ["==", ["get", "isClosure"], true],
+            paint: {
+              "circle-radius": [
+                "interpolate", ["linear"], ["zoom"], 10, 6, 14, 11,
+              ] as ExpressionSpecification,
+              "circle-color": "#0a1628",
+              "circle-opacity": 0.5,
+              "circle-stroke-color": ["get", "color"],
+              "circle-stroke-width": 3,
+            },
+          });
+
+          // A ✕ sits on each closure for unmistakable "blocked" signalling.
+          map.addLayer({
+            id: "events-closure-icon",
+            type: "symbol",
+            source: "events",
+            filter: ["==", ["get", "isClosure"], true],
+            layout: {
+              "text-field": "✕",
+              "text-font": ["Noto Sans Regular"],
+              "text-size": [
+                "interpolate", ["linear"], ["zoom"], 10, 8, 14, 12,
+              ] as ExpressionSpecification,
+              "text-allow-overlap": true,
+            },
+            paint: {
+              "text-color": ["get", "color"],
+              "text-halo-color": "#0a1628",
+              "text-halo-width": 1,
+            },
+          });
+
+          wireEventInteractions(map);
+        }
+      } catch (err) {
+        console.warn("events layer unavailable:", err);
+      }
+
       // Set up every registered overlay view. Each adds its own (hidden)
       // sources/layers; a failure in one view must not break the map.
       for (const view of VIEWS) {
@@ -426,15 +513,27 @@ export function MapView() {
   useEffect(() => {
     if (!ready) return;
     return subscribeMapCommand((cmd) => {
-      if (cmd.type !== "applyPlan") return;
       const map = mapRef.current;
-      const fc = nbhdFcRef.current;
-      if (!map || !fc) return;
-      const action = planToMapAction(cmd.weights, fc);
-      selectView(action.viewId);
-      const bounds = bboxForNums(fc, action.highlightNums);
-      if (bounds) {
-        map.fitBounds(bounds, { padding: 90, duration: 900, maxZoom: 13 });
+      if (!map) return;
+
+      if (cmd.type === "focusEvent") {
+        // Fly to the event and ring it so the user sees where it is.
+        map.flyTo({ center: [cmd.lng, cmd.lat], zoom: 13.5, duration: 1100 });
+        if (map.getLayer("events-focus")) {
+          map.setFilter("events-focus", ["==", ["get", "id"], cmd.eventId]);
+        }
+        return;
+      }
+
+      if (cmd.type === "applyPlan") {
+        const fc = nbhdFcRef.current;
+        if (!fc) return;
+        const action = planToMapAction(cmd.weights, fc);
+        selectView(action.viewId);
+        const bounds = bboxForNums(fc, action.highlightNums);
+        if (bounds) {
+          map.fitBounds(bounds, { padding: 90, duration: 900, maxZoom: 13 });
+        }
       }
     });
   }, [ready, selectView]);
@@ -620,4 +719,29 @@ function wireInteractions(
       .setHTML(`<b>${p.name}</b><br>Bus stop${served ? ` · ${served}` : ""}`)
       .addTo(map);
   });
+}
+
+/** Hover cursor + click popup on event markers (closures and demand surges). */
+function wireEventInteractions(map: maplibregl.Map) {
+  const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
+  for (const layer of ["events-closure", "events-demand"]) {
+    map.on("mouseenter", layer, () => {
+      map.getCanvas().style.cursor = "pointer";
+    });
+    map.on("mouseleave", layer, () => {
+      map.getCanvas().style.cursor = "";
+    });
+    map.on("click", layer, (e: MapLayerMouseEvent) => {
+      const p = e.features?.[0]?.properties;
+      if (!p) return;
+      const kind = p.isClosure ? "Closure / disruption" : "Major event";
+      popup
+        .setLngLat(e.lngLat)
+        .setHTML(
+          `<b>${p.title}</b><br>${kind} · ${String(p.magnitude)}<br>${p.venueName ?? ""}`,
+        )
+        .addTo(map);
+      map.flyTo({ center: e.lngLat, zoom: 13.5, duration: 900 });
+    });
+  }
 }

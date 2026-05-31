@@ -5,11 +5,20 @@
 import type { RewardWeights } from "@/lib/planner";
 
 /** Commands the map knows how to execute. */
-export type MapCommand = {
-  type: "applyPlan";
-  weights: RewardWeights;
-  goal: string;
-};
+export type MapCommand =
+  | {
+      type: "applyPlan";
+      weights: RewardWeights;
+      goal: string;
+    }
+  | {
+      // Fly the camera to a city event (e.g. clicking an alert card) and
+      // highlight it. Carries the venue location + the event id.
+      type: "focusEvent";
+      eventId: string;
+      lng: number;
+      lat: number;
+    };
 
 type Handler = (cmd: MapCommand) => void;
 
