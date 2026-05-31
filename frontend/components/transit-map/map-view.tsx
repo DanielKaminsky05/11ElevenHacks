@@ -317,7 +317,12 @@ export function MapView() {
     );
     setActiveRouteId((prev) => (prev === r.id ? null : r.id));
   }, []);
-  onRouteClickRef.current = toggleRoute;
+
+  // Keep the click-handler ref pointed at the latest callback (refs must not be
+  // assigned during render).
+  useEffect(() => {
+    onRouteClickRef.current = toggleRoute;
+  }, [toggleRoute]);
 
   // Apply selection styling: dim unselected routes, highlight selected ones.
   useEffect(() => {
