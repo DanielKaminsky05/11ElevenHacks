@@ -1,13 +1,100 @@
 // VIEW: People & need  (brainstorm #1, #2, #6, #24 — Families A & C)
 //
-// STATUS: STUB — to be implemented by the `demographics` agent.
-//
-// Goal: one neighbourhood choropleth with a METRIC SWITCHER (options dropdown)
-// over: population, population density, low-income prevalence, transit-commute
-// share, senior share, renter share. All fields already exist per neighbourhood
-// in neighbourhoods.json. See AGENT BRIEF in .claude/agents/view-demographics.md.
+// Neighbourhood choropleth with a metric switcher across demographic fields.
+// Sub-metrics: density, low_income_pct, transit_commute_pct, senior_pct, renter_pct.
 
-import type { ViewModule } from "./types";
+import {
+  loadNeighbourhoods,
+  propertyExtent,
+  RAMP_BLUE,
+  RAMP_NEED,
+  RAMP_PURPLE,
+  type NeighbourhoodFC,
+  type NeighbourhoodProps,
+} from "@/lib/choropleth";
+import type { ViewContext, ViewModule } from "./types";
+import {
+  addChoroplethLayers,
+  ensureNeighbourhoodsSource,
+  recolorChoropleth,
+  wireChoroplethPopup,
+} from "./choropleth-helpers";
+
+// ---------------------------------------------------------------------------
+// Option metadata
+// ---------------------------------------------------------------------------
+
+interface MetricMeta {
+  prop: keyof NeighbourhoodProps;
+  label: string;
+  ramp: string[];
+  units: string;
+}
+
+const METRICS: Record<string, MetricMeta> = {
+  density: {
+    prop: "density",
+    label: "Population density",
+    ramp: RAMP_BLUE,
+    units: "/km²",
+  },
+  low_income_pct: {
+    prop: "low_income_pct",
+    label: "Low-income prevalence",
+    ramp: RAMP_NEED,
+    units: "%",
+  },
+  transit_commute_pct: {
+    prop: "transit_commute_pct",
+    label: "Transit commute share",
+    ramp: RAMP_BLUE,
+    units: "%",
+  },
+  senior_pct: {
+    prop: "senior_pct",
+    label: "Seniors (65+)",
+    ramp: RAMP_PURPLE,
+    units: "%",
+  },
+  renter_pct: {
+    prop: "renter_pct",
+    label: "Renters",
+    ramp: RAMP_PURPLE,
+    units: "%",
+  },
+};
+
+const FILL_ID = "demographics-fill";
+const DEFAULT_OPTION_ID = "density";
+
+// ---------------------------------------------------------------------------
+// Module-scope state (populated during setup)
+// ---------------------------------------------------------------------------
+
+let _fc: NeighbourhoodFC | null = null;
+let _activeOptionId: string = DEFAULT_OPTION_ID;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatValue(raw: unknown, units: string): string {
+  if (raw === null || raw === undefined || raw === "") return "n/a";
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return "n/a";
+  return units === "/km²" ? `${Math.round(n).toLocaleString()}${units}` : `${n.toFixed(1)}${units}`;
+}
+
+function popupHtml(props: Record<string, unknown>): string {
+  const meta = METRICS[_activeOptionId] ?? METRICS[DEFAULT_OPTION_ID];
+  const name = String(props["name"] ?? "Unknown");
+  const value = formatValue(props[meta.prop], meta.units);
+  return `<strong>${name}</strong><br/>${meta.label}: ${value}`;
+}
+
+// ---------------------------------------------------------------------------
+// View module
+// ---------------------------------------------------------------------------
 
 export const demographicsView: ViewModule = {
   id: "demographics",
@@ -23,16 +110,77 @@ export const demographicsView: ViewModule = {
     { id: "renter_pct", label: "Renters" },
   ],
 
-  setup() {
-    // TODO(agent): add neighbourhoods source + one choropleth fill; recolor by
-    // the active option (default the first). Push layer ids. Create hidden.
+  async setup(ctx: ViewContext): Promise<void> {
+    const { map } = ctx;
+
+    // Load data
+    const fc = await loadNeighbourhoods();
+    _fc = fc;
+    _activeOptionId = DEFAULT_OPTION_ID;
+
+    // Add shared source (deduped)
+    ensureNeighbourhoodsSource(map, fc);
+
+    // Add fill + outline layers, both hidden
+    const [fillId, outlineId] = addChoroplethLayers(map, {
+      fillId: FILL_ID,
+      visible: false,
+      fillOpacity: 0.65,
+    });
+
+    // Register layer ids so the shell can toggle visibility
+    demographicsView.layerIds.push(fillId, outlineId);
+
+    // Paint the default metric
+    const meta = METRICS[DEFAULT_OPTION_ID];
+    recolorChoropleth(map, fillId, fc, meta.prop, meta.ramp);
+
+    // Hover + click popup
+    wireChoroplethPopup(map, fillId, popupHtml);
   },
 
-  setOption() {
-    // TODO(agent): recolor the fill by the chosen property (recolorChoropleth).
+  setOption(ctx: ViewContext, optionId: string): void {
+    if (!_fc) return;
+    const meta = METRICS[optionId];
+    if (!meta) return;
+    _activeOptionId = optionId;
+    recolorChoropleth(ctx.map, FILL_ID, _fc, meta.prop, meta.ramp);
   },
 
   legend() {
-    return null; // TODO(agent): ramp + dynamic title/units per active option
+    const meta = METRICS[_activeOptionId] ?? METRICS[DEFAULT_OPTION_ID];
+
+    // Static fallback before data loads
+    if (!_fc) {
+      return {
+        title: meta.label,
+        ramp: {
+          colors: meta.ramp,
+          lowLabel: `Low ${meta.units}`,
+          highLabel: `High ${meta.units}`,
+        },
+      };
+    }
+
+    const extent = propertyExtent(_fc, meta.prop);
+    const [min, max] = extent ?? [0, 100];
+
+    const lowLabel =
+      meta.units === "/km²"
+        ? `${Math.round(min).toLocaleString()}${meta.units}`
+        : `${min.toFixed(1)}${meta.units}`;
+    const highLabel =
+      meta.units === "/km²"
+        ? `${Math.round(max).toLocaleString()}${meta.units}`
+        : `${max.toFixed(1)}${meta.units}`;
+
+    return {
+      title: meta.label,
+      ramp: {
+        colors: meta.ramp,
+        lowLabel,
+        highLabel,
+      },
+    };
   },
 };
