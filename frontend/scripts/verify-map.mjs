@@ -1,8 +1,10 @@
 // Programmatic verification of the transit map render.
 //
 // Loads the running app, probes the DOM (status text, legend, canvas), then
-// screenshots and analyzes the pixels to confirm the dark background plus the
-// route/stop colors actually drew. Writes a JSON report to stdout and a file.
+// screenshots and analyzes the pixels to confirm the dark basemap plus the
+// route network and stops actually drew. Writes a JSON report to stdout and a
+// file, and exits non-zero if any check fails. Catches the class of bug where
+// the map mounts but renders into a collapsed (0-height) container.
 //
 // Usage: node scripts/verify-map.mjs [reportfile]
 // Env: MAP_URL (default http://localhost:3000)
@@ -30,6 +32,21 @@ function near([r, g, b], [tr, tg, tb], tol = 38) {
     Math.abs(g - tg) <= tol &&
     Math.abs(b - tb) <= tol
   );
+}
+
+// Saturation of an RGB pixel (0..1). Route lines and their glow are vivid,
+// while the dark basemap is near-gray, so saturation separates "drew a colored
+// network" from "empty/basemap" without depending on exact line colors.
+function saturation([r, g, b]) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max === 0 ? 0 : (max - min) / max;
+}
+
+// Cyan/blue route pixel (the bus network dominates the map). Generous enough to
+// catch glow-blended and anti-aliased edges.
+function isBlueRoute([r, g, b]) {
+  return b > 110 && b - r > 40 && g - r > 10;
 }
 
 async function main() {
@@ -80,22 +97,17 @@ async function main() {
   // --- Pixel analysis on the composited frame ---
   const buf = await page.screenshot();
   const png = PNG.sync.read(buf);
-  const counts = { background: 0, subway: 0, streetcar: 0, bus: 0, stop: 0, other: 0 };
+  const counts = { vivid: 0, blueRoute: 0, stop: 0 };
   const total = png.width * png.height;
+  let lumSum = 0;
   for (let i = 0; i < png.data.length; i += 4) {
     const px = [png.data[i], png.data[i + 1], png.data[i + 2]];
-    let matched = false;
-    for (const key of ["subway", "streetcar", "bus", "stop"]) {
-      if (near(px, TARGETS[key])) {
-        counts[key]++;
-        matched = true;
-        break;
-      }
-    }
-    if (matched) continue;
-    if (near(px, TARGETS.background, 24)) counts.background++;
-    else counts.other++;
+    lumSum += (px[0] + px[1] + px[2]) / 3;
+    if (near(px, TARGETS.stop, 34)) counts.stop++;
+    if (isBlueRoute(px)) counts.blueRoute++;
+    if (saturation(px) > 0.45) counts.vivid++; // any saturated network pixel
   }
+  const meanLuminance = lumSum / total; // 0..255, dark theme should be low
 
   const pct = (n) => +((n / total) * 100).toFixed(3);
   const report = {
@@ -103,22 +115,20 @@ async function main() {
     dom,
     pixels: {
       total,
-      backgroundPct: pct(counts.background),
-      subwayPct: pct(counts.subway),
-      streetcarPct: pct(counts.streetcar),
-      busPct: pct(counts.bus),
+      meanLuminance: +meanLuminance.toFixed(1),
+      vividPct: pct(counts.vivid),
+      blueRoutePct: pct(counts.blueRoute),
       stopPct: pct(counts.stop),
-      otherPct: pct(counts.other),
     },
     consoleErrors,
     checks: {
       canvasFillsViewport: dom.canvasWidth >= 1400 && dom.canvasHeight >= 850,
       statusShowsCounts: /232 routes/.test(dom.statusLine ?? ""),
       fourLegendToggles: dom.legendButtons.length === 4,
-      backgroundIsDark: pct(counts.background) > 30,
-      routesDrew:
-        pct(counts.subway) + pct(counts.streetcar) + pct(counts.bus) > 0.2,
-      stopsDrew: pct(counts.stop) > 0.01,
+      // Dark theme: the frame should be dim on average (basemap + background).
+      backgroundIsDark: meanLuminance < 90,
+      routesDrew: pct(counts.blueRoute) > 0.3,
+      stopsDrew: pct(counts.stop) > 0.05,
       noConsoleErrors: consoleErrors.length === 0,
     },
   };
