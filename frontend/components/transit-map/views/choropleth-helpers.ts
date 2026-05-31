@@ -78,7 +78,7 @@ export function recolorChoropleth(
   colors: string[],
 ): number[] {
   const values = fc.features.map(
-    (f) => (f.properties as Record<string, unknown>)[property] as number | null,
+    (f) => (f.properties as unknown as Record<string, unknown>)[property] as number | null,
   );
   const breaks = quantileBreaks(values, colors.length);
   map.setPaintProperty(
