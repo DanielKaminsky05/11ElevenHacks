@@ -21,18 +21,21 @@ import type { LegendSpec, ViewContext, ViewModule } from "./types";
 
 const FILL_ID = "occupation-fill";
 
-/** NOC options ordered by transit relevance (per spec). */
+// Each option is the % of the neighbourhood's labour force in one of Statistics
+// Canada's 10 broad NOC occupation groups. Ordered by transit relevance.
+const NOC_DESC =
+  "% of the local workforce in this occupation group (Statistics Canada NOC).";
 const OPTIONS = [
-  { id: "noc3_pct", label: "Health" },
-  { id: "noc7_pct", label: "Trades & transport" },
-  { id: "noc6_pct", label: "Sales & service" },
-  { id: "noc1_pct", label: "Business, finance & admin" },
-  { id: "noc2_pct", label: "Sciences & tech" },
-  { id: "noc0_pct", label: "Management" },
-  { id: "noc4_pct", label: "Education, law, social & gov" },
-  { id: "noc5_pct", label: "Art, culture & recreation" },
-  { id: "noc8_pct", label: "Natural resources & agriculture" },
-  { id: "noc9_pct", label: "Manufacturing & utilities" },
+  { id: "noc3_pct", label: "Health", description: `Nurses, aides, technicians and other health workers — ${NOC_DESC}` },
+  { id: "noc7_pct", label: "Trades & transport", description: `Construction, mechanics, drivers and equipment operators — ${NOC_DESC}` },
+  { id: "noc6_pct", label: "Sales & service", description: `Retail, food service and customer-facing roles (often shift work) — ${NOC_DESC}` },
+  { id: "noc1_pct", label: "Business, finance & admin", description: `Office, finance and administrative roles — ${NOC_DESC}` },
+  { id: "noc2_pct", label: "Sciences & tech", description: `Engineering, IT and applied-science roles — ${NOC_DESC}` },
+  { id: "noc0_pct", label: "Management", description: `Senior managers and executives — ${NOC_DESC}` },
+  { id: "noc4_pct", label: "Education, law, social & gov", description: `Teachers, lawyers, social and government workers — ${NOC_DESC}` },
+  { id: "noc5_pct", label: "Art, culture & recreation", description: `Artists, media, sport and recreation workers — ${NOC_DESC}` },
+  { id: "noc8_pct", label: "Natural resources & agriculture", description: `Farming, forestry, fishing and mining — ${NOC_DESC}` },
+  { id: "noc9_pct", label: "Manufacturing & utilities", description: `Factory, processing and utilities workers — ${NOC_DESC}` },
 ] as const;
 
 // Module-scoped cache so legend() can read data after setup resolves.
@@ -45,7 +48,7 @@ export const occupationView: ViewModule = {
   group: "People",
   description: "Share of the labour force by occupation category, per neighbourhood.",
   layerIds: [],
-  options: OPTIONS.map((o) => ({ id: o.id, label: o.label })),
+  options: OPTIONS.map((o) => ({ id: o.id, label: o.label, description: o.description })),
 
   async setup(ctx: ViewContext) {
     const { map } = ctx;

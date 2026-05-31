@@ -71,10 +71,30 @@ export const marginalizationView: ViewModule = {
   description: "Ontario Marginalization Index 2021 quintiles, with NIA overlay.",
   layerIds: [],
   options: [
-    { id: "marg_material", label: "Material deprivation" },
-    { id: "marg_households", label: "Households & dwellings" },
-    { id: "marg_age_labour", label: "Age & labour force" },
-    { id: "marg_racialized", label: "Racialized & newcomer" },
+    {
+      id: "marg_material",
+      label: "Material deprivation",
+      description:
+        "Inability to afford basic needs — built from low income, no diploma, unemployment, lone-parent families and homes needing repair. The closest measure to hardship.",
+    },
+    {
+      id: "marg_households",
+      label: "Households & dwellings",
+      description:
+        "Less-settled housing: people living alone, renting, in apartments, or moving often (formerly 'residential instability').",
+    },
+    {
+      id: "marg_age_labour",
+      label: "Age & labour force",
+      description:
+        "Share of people not in the workforce — seniors and children (formerly 'dependency'). Higher means more dependents per worker.",
+    },
+    {
+      id: "marg_racialized",
+      label: "Racialized & newcomer",
+      description:
+        "Concentration of recent immigrants and racialized groups (formerly 'ethnic concentration').",
+    },
   ],
 
   async setup({ map }: ViewContext): Promise<void> {

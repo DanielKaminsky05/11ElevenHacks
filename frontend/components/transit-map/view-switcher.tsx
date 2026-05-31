@@ -75,17 +75,31 @@ export function ViewSwitcher({
           </div>
 
           {active.options && active.options.length > 0 && (
-            <select
-              value={activeOption ?? active.options[0].id}
-              onChange={(e) => onOption(e.target.value)}
-              className="mb-2 w-full rounded-md border border-sky-400/25 bg-[#0a1628] px-2 py-1 text-[12.5px] text-[#dce6f5]"
-            >
-              {active.options.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+            <>
+              <select
+                value={activeOption ?? active.options[0].id}
+                onChange={(e) => onOption(e.target.value)}
+                className="w-full rounded-md border border-sky-400/25 bg-[#0a1628] px-2 py-1 text-[12.5px] text-[#dce6f5]"
+              >
+                {active.options.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {(() => {
+                const current =
+                  active.options.find((o) => o.id === activeOption) ??
+                  active.options[0];
+                return current.description ? (
+                  <p className="mt-1.5 mb-2 text-[11px] leading-snug text-[#8aa0c4]">
+                    {current.description}
+                  </p>
+                ) : (
+                  <div className="mb-2" />
+                );
+              })()}
+            </>
           )}
 
           {legend && <LegendView spec={legend} />}

@@ -35,6 +35,8 @@ export interface LegendSpec {
 export interface ViewOption {
   id: string;
   label: string;
+  /** Plain-language explanation of this metric, shown under the dropdown. */
+  description?: string;
 }
 
 export interface ViewModule {

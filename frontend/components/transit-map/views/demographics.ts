@@ -103,11 +103,32 @@ export const demographicsView: ViewModule = {
   description: "Population, density, income, and who already rides transit.",
   layerIds: [],
   options: [
-    { id: "density", label: "Population density" },
-    { id: "low_income_pct", label: "Low-income prevalence" },
-    { id: "transit_commute_pct", label: "Transit commute share" },
-    { id: "senior_pct", label: "Seniors (65+)" },
-    { id: "renter_pct", label: "Renters" },
+    {
+      id: "density",
+      label: "Population density",
+      description: "Residents per km² — where the city is packed vs. spread out.",
+    },
+    {
+      id: "low_income_pct",
+      label: "Low-income prevalence",
+      description:
+        "% of residents below Statistics Canada's after-tax Low-Income Measure — higher means more poverty.",
+    },
+    {
+      id: "transit_commute_pct",
+      label: "Transit commute share",
+      description: "% of workers who get to work by transit — where it's already the norm.",
+    },
+    {
+      id: "senior_pct",
+      label: "Seniors (65+)",
+      description: "% of residents 65 or older — a proxy for mobility-limited, transit-reliant riders.",
+    },
+    {
+      id: "renter_pct",
+      label: "Renters",
+      description: "% of households that rent vs. own — a proxy for housing precarity and turnover.",
+    },
   ],
 
   async setup(ctx: ViewContext): Promise<void> {
