@@ -3,6 +3,7 @@
 ## Documentation
 
 - [Next.js Best Practices](docs/best-practices/nextjs.md) — conventions for the Next.js frontend.
+- [Testing Best Practices](docs/best-practices/testing.md) — how to write and maintain tests.
 
 ## Committing
 
