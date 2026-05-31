@@ -2,6 +2,19 @@
 
 Toronto open-data sources, organized by theme. Original download filenames are noted in parentheses.
 
+## Regenerating this folder
+
+This folder is **git-ignored** (~7 GB, with files over GitHub's 100 MB limit), so it is not committed. To rebuild it on a fresh checkout (e.g. the ASUS backend):
+
+```bash
+git clone <repo> && cd 11ElevenHacks
+python scripts/fetch_data.py            # download everything missing (idempotent)
+python scripts/fetch_data.py --check    # validate sources without downloading
+python scripts/fetch_data.py --insecure # if a gov host has a broken TLS cert chain
+```
+
+All sources are public open-data APIs / direct URLs (City of Toronto CKAN, Statistics Canada, Metrolinx, Geospatial Ontario, Public Health Ontario). Two files (`geospatial/areas.geojson`, `geospatial/transit-stations.geojson`) have unconfirmed provenance and must be supplied manually.
+
 ## transit/
 - `ttc-bus-delay-2025.csv` — TTC bus delay records, 2025 (was `TTC Bus Delay Data since 2025.csv`)
 - `ttc-streetcar-delay-2025.csv` — TTC streetcar delay records, 2025 (was `TTC Streetcar Delay Data since 2025.csv`)
