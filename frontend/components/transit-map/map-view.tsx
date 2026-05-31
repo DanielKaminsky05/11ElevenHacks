@@ -17,6 +17,9 @@ import {
   toGeoJSON,
 } from "@/lib/transit";
 import { MapLegend, type LayerKey, type LegendState } from "./map-legend";
+import { ViewSwitcher } from "./view-switcher";
+import { VIEWS, getView } from "./views/registry";
+import type { LegendSpec } from "./views/types";
 
 /** Map layer ids controlled by each legend toggle. */
 const LAYERS_BY_KEY: Record<LayerKey, string[]> = {
@@ -46,6 +49,11 @@ export function MapView() {
   });
   const [visibility, setVisibility] = useState<LegendState>(INITIAL_VISIBILITY);
   const [ready, setReady] = useState(false);
+
+  // Overlay-view state (choropleths etc. registered in views/registry.ts).
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const [activeOption, setActiveOption] = useState<string | null>(null);
+  const [viewLegend, setViewLegend] = useState<LegendSpec | null>(null);
 
   // Create the map and load the network once on mount.
   useEffect(() => {
@@ -171,6 +179,17 @@ export function MapView() {
 
       wirePopups(map);
 
+      // Set up every registered overlay view. Each adds its own (hidden)
+      // sources/layers; a failure in one view must not break the map.
+      for (const view of VIEWS) {
+        try {
+          await view.setup({ map });
+        } catch (err) {
+          console.warn(`view "${view.id}" setup failed:`, err);
+        }
+      }
+      if (cancelled) return;
+
       setCounts({
         subway: data.counts.subway,
         streetcar: data.counts.streetcar,
@@ -203,8 +222,38 @@ export function MapView() {
     }
   }, [visibility, ready]);
 
+  // Show only the active overlay view's layers; hide all others.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    for (const view of VIEWS) {
+      const visible = view.id === activeViewId ? "visible" : "none";
+      for (const id of view.layerIds) {
+        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visible);
+      }
+    }
+    const active = activeViewId ? getView(activeViewId) : null;
+    setViewLegend(active ? active.legend() : null);
+  }, [activeViewId, ready]);
+
   function toggleLayer(key: LayerKey) {
     setVisibility((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  function selectView(id: string | null) {
+    setActiveViewId(id);
+    const view = id ? getView(id) : null;
+    const firstOption = view?.options?.[0]?.id ?? null;
+    setActiveOption(firstOption);
+  }
+
+  function changeOption(optionId: string) {
+    const map = mapRef.current;
+    const view = activeViewId ? getView(activeViewId) : null;
+    if (!map || !view?.setOption) return;
+    view.setOption({ map }, optionId);
+    setActiveOption(optionId);
+    setViewLegend(view.legend());
   }
 
   return (
@@ -219,6 +268,16 @@ export function MapView() {
         counts={counts}
         onToggle={toggleLayer}
       />
+      {ready && (
+        <ViewSwitcher
+          views={VIEWS}
+          activeId={activeViewId}
+          activeOption={activeOption}
+          onSelect={selectView}
+          onOption={changeOption}
+          legend={viewLegend}
+        />
+      )}
     </div>
   );
 }
