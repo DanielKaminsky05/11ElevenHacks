@@ -409,7 +409,9 @@ def simulate_change(args: SimulateChangeArgs) -> dict:
     "remove the King St stop"). Takes explicit add/move/remove operations; returns before/after
     accessibility metrics and a winners/losers breakdown.
 
-    Use when the planner already has a change in mind ("what if ...", "what happens if we ...").
+    Use when the planner already has a change in mind ("what if ...", "what happens if we ...")
+    AND gives specific, real stop locations/operations. NEVER invent coordinates to satisfy
+    this tool — if you don't have exact locations, use optimize_layout to find them from data.
     Do NOT use to discover the best change — that is optimize_layout. Do NOT use for current
     state with no change — that is compute_accessibility / list_transit."""
     baseline_stops = _load_gtfs_stops()
