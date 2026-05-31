@@ -242,19 +242,11 @@ export function MapView() {
         if (!cancelled && !map.getSource("nbhd-labels")) {
           map.addSource("nbhd-labels", { type: "geojson", data: hoods });
 
-          // Invisible fill used purely for neighbourhood click hit-testing
-          // (opens the detail drawer). Inserted below the route glow so route
-          // clicks take priority. fill-opacity 0 stays interactive.
-          map.addLayer(
-            {
-              id: "nbhd-hit",
-              type: "fill",
-              source: "nbhd-labels",
-              paint: { "fill-color": "#000000", "fill-opacity": 0 },
-            },
-            map.getLayer("subway-glow") ? "subway-glow" : undefined,
-          );
-          map.on("click", "nbhd-hit", (e: MapLayerMouseEvent) => {
+          // Open the community summary only when the neighbourhood NAME label
+          // (the "title") is clicked — clicking anywhere in the polygon felt too
+          // aggressive. The label layer is added just below; MapLibre resolves a
+          // layer-scoped handler at event time, so registering it first is fine.
+          map.on("click", "nbhd-labels-layer", (e: MapLayerMouseEvent) => {
             // Route clicks win over neighbourhood selection.
             const routeHit = map.queryRenderedFeatures(e.point, {
               layers: ["subway-line", "streetcar-line", "bus-line"].filter((l) =>
@@ -265,10 +257,10 @@ export function MapView() {
             const props = e.features?.[0]?.properties;
             if (props) setSelectedNbhd(props as unknown as NeighbourhoodProps);
           });
-          map.on("mouseenter", "nbhd-hit", () => {
+          map.on("mouseenter", "nbhd-labels-layer", () => {
             map.getCanvas().style.cursor = "pointer";
           });
-          map.on("mouseleave", "nbhd-hit", () => {
+          map.on("mouseleave", "nbhd-labels-layer", () => {
             map.getCanvas().style.cursor = "";
           });
 

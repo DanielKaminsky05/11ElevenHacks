@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   EXAMPLE_GOALS,
+  sendAgent,
   sendPlannerGoal,
   type ChatMessage,
 } from "@/lib/planner";
@@ -10,6 +11,16 @@ import { emitMapCommand } from "@/lib/map-bus";
 
 let _idSeq = 0;
 const nextId = () => `m${Date.now()}-${_idSeq++}`;
+
+// Tools whose presence in the agent's trace mean the answer is an actual *plan*
+// (a stop layout / scenario). Only then are reward weights and the map's
+// "apply plan" command relevant — lookups and diagnostic questions shouldn't
+// show weight bars or yank the map view/filters around.
+const PLAN_TOOLS = new Set([
+  "optimize_layout",
+  "propose_candidates",
+  "simulate_change",
+]);
 
 const GREETING: ChatMessage = {
   id: "greeting",
@@ -57,19 +68,54 @@ export function PlannerChat() {
     setPending(true);
 
     try {
-      const res = await sendPlannerGoal({ goal: text, history });
+      // Ask the grounded agent (real answer + tool trace) and the planner
+      // (reward weights that drive the map) in parallel — neither blocks the other.
+      const [agentRes, plannerRes] = await Promise.allSettled([
+        sendAgent(text),
+        sendPlannerGoal({ goal: text, history }),
+      ]);
+
+      const weights =
+        plannerRes.status === "fulfilled" ? plannerRes.value.weights : undefined;
+
+      let content: string;
+      let steps: ChatMessage["steps"];
+      // Reward weights + the map "apply plan" command only make sense when the
+      // answer is an actual plan; gate on whether a planning tool was run.
+      let isPlan = false;
+      if (agentRes.status === "fulfilled" && agentRes.value.reply.trim()) {
+        // Preferred: the grounded, tool-backed answer.
+        content = agentRes.value.reply.trim();
+        steps = agentRes.value.steps;
+        isPlan = steps.some((s) => PLAN_TOOLS.has(s.tool));
+      } else if (plannerRes.status === "fulfilled") {
+        // Agent failed — fall back to the planner's reward-weight summary.
+        content = plannerRes.value.reply;
+        isPlan = true;
+      } else {
+        throw agentRes.status === "rejected"
+          ? agentRes.reason
+          : new Error("The planner is unavailable. Try again.");
+      }
+
+      // Attach weights only for plans, so lookups/questions don't render bars.
+      const planWeights = isPlan ? weights : undefined;
       setMessages((prev) => [
         ...prev,
         {
           id: nextId(),
           role: "assistant",
-          content: res.reply,
-          weights: res.weights,
+          content,
+          weights: planWeights,
+          steps,
           createdAt: Date.now(),
         },
       ]);
-      // Drive the map: switch to the implied view + focus the priority areas.
-      emitMapCommand({ type: "applyPlan", weights: res.weights, goal: text });
+      // Only drive the map for an actual plan — don't switch the view/filters
+      // for ordinary questions.
+      if (isPlan && planWeights) {
+        emitMapCommand({ type: "applyPlan", weights: planWeights, goal: text });
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -199,8 +245,22 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         }
       >
         {message.content}
+        {message.steps && message.steps.length > 0 && (
+          <ToolTrace steps={message.steps} />
+        )}
         {message.weights && <WeightBars weights={message.weights} />}
       </div>
+    </div>
+  );
+}
+
+function ToolTrace({ steps }: { steps: NonNullable<ChatMessage["steps"]> }) {
+  const tools = Array.from(new Set(steps.map((s) => s.tool)));
+  if (tools.length === 0) return null;
+  return (
+    <div className="mt-2 border-t border-white/10 pt-1.5 text-[10px] text-[#7e93b5]">
+      <span className="uppercase tracking-[0.5px]">grounded via</span>{" "}
+      <span className="text-[#9fb4d6]">{tools.join(" · ")}</span>
     </div>
   );
 }

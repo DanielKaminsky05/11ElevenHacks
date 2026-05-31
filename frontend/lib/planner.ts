@@ -14,6 +14,8 @@ export interface ChatMessage {
   content: string;
   /** Reward weights the planner inferred from the goal (assistant only). */
   weights?: RewardWeights;
+  /** Tool-call trace from the grounded agent (assistant only). */
+  steps?: AgentStep[];
   createdAt: number;
 }
 
@@ -52,6 +54,36 @@ export async function sendPlannerGoal(req: PlannerRequest): Promise<PlannerRespo
   });
   if (!res.ok) {
     throw new Error(`Planner request failed (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+/** One executed tool call in the agent's trace (mirrors the backend ChatStep). */
+export interface AgentStep {
+  tool: string;
+  arguments: Record<string, unknown>;
+  result: unknown;
+}
+
+export interface AgentResponse {
+  reply: string;
+  steps: AgentStep[];
+}
+
+/**
+ * Ask the grounded tool-calling agent (Nemotron) a question. Unlike
+ * sendPlannerGoal — which only returns reward weights — this returns a real
+ * answer grounded in tool results, plus the tool trace. Hits /api/agent, which
+ * proxies the backend's POST /chat loop.
+ */
+export async function sendAgent(message: string): Promise<AgentResponse> {
+  const res = await fetch("/api/agent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok) {
+    throw new Error(`Agent request failed (HTTP ${res.status})`);
   }
   return res.json();
 }
