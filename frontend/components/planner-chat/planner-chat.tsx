@@ -6,6 +6,7 @@ import {
   sendPlannerGoal,
   type ChatMessage,
 } from "@/lib/planner";
+import { emitMapCommand } from "@/lib/map-bus";
 
 let _idSeq = 0;
 const nextId = () => `m${Date.now()}-${_idSeq++}`;
@@ -67,6 +68,8 @@ export function PlannerChat() {
           createdAt: Date.now(),
         },
       ]);
+      // Drive the map: switch to the implied view + focus the priority areas.
+      emitMapCommand({ type: "applyPlan", weights: res.weights, goal: text });
     } catch (err) {
       setMessages((prev) => [
         ...prev,

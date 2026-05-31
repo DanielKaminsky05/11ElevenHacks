@@ -16,10 +16,19 @@ import {
   loadNetwork,
   toGeoJSON,
 } from "@/lib/transit";
-import { loadNeighbourhoods } from "@/lib/choropleth";
+import {
+  loadNeighbourhoods,
+  type NeighbourhoodFC,
+  type NeighbourhoodProps,
+} from "@/lib/choropleth";
+import { subscribeMapCommand } from "@/lib/map-bus";
+import { planToMapAction } from "@/lib/planner-actions";
 import { MapLegend, type LayerKey, type LegendState } from "./map-legend";
 import { ViewSwitcher } from "./view-switcher";
 import { RouteDetails, type SelectedRoute } from "./route-details";
+import { MapControls } from "./map-controls";
+import { NeighbourhoodDrawer } from "./neighbourhood-drawer";
+import { setChoroplethPopupsEnabled } from "./views/choropleth-helpers";
 import { VIEWS, getView } from "./views/registry";
 import type { LegendSpec } from "./views/types";
 
@@ -63,6 +72,12 @@ export function MapView() {
   // Map click handlers live in the setup closure; route through a ref so they
   // always call the latest React state updater.
   const onRouteClickRef = useRef<(r: SelectedRoute) => void>(() => {});
+
+  // Neighbourhood selection (click a polygon to open the detail drawer).
+  const [selectedNbhd, setSelectedNbhd] = useState<NeighbourhoodProps | null>(null);
+  // Cached neighbourhood FeatureCollection — used for the click hit-layer and
+  // for fitting the camera when the planner drives the map.
+  const nbhdFcRef = useRef<NeighbourhoodFC | null>(null);
 
   // Create the map and load the network once on mount.
   useEffect(() => {
@@ -217,8 +232,40 @@ export function MapView() {
       // each label at its polygon's centroid automatically.
       try {
         const hoods = await loadNeighbourhoods();
+        nbhdFcRef.current = hoods;
         if (!cancelled && !map.getSource("nbhd-labels")) {
           map.addSource("nbhd-labels", { type: "geojson", data: hoods });
+
+          // Invisible fill used purely for neighbourhood click hit-testing
+          // (opens the detail drawer). Inserted below the route glow so route
+          // clicks take priority. fill-opacity 0 stays interactive.
+          map.addLayer(
+            {
+              id: "nbhd-hit",
+              type: "fill",
+              source: "nbhd-labels",
+              paint: { "fill-color": "#000000", "fill-opacity": 0 },
+            },
+            map.getLayer("subway-glow") ? "subway-glow" : undefined,
+          );
+          map.on("click", "nbhd-hit", (e: MapLayerMouseEvent) => {
+            // Route clicks win over neighbourhood selection.
+            const routeHit = map.queryRenderedFeatures(e.point, {
+              layers: ["subway-line", "streetcar-line", "bus-line"].filter((l) =>
+                map.getLayer(l),
+              ),
+            });
+            if (routeHit.length) return;
+            const props = e.features?.[0]?.properties;
+            if (props) setSelectedNbhd(props as unknown as NeighbourhoodProps);
+          });
+          map.on("mouseenter", "nbhd-hit", () => {
+            map.getCanvas().style.cursor = "pointer";
+          });
+          map.on("mouseleave", "nbhd-hit", () => {
+            map.getCanvas().style.cursor = "";
+          });
+
           map.addLayer({
             id: "nbhd-labels-layer",
             type: "symbol",
@@ -261,6 +308,10 @@ export function MapView() {
         }
       }
       if (cancelled) return;
+
+      // The neighbourhood drawer is the single detail surface, so suppress the
+      // smaller per-view click popups to avoid double UI.
+      setChoroplethPopupsEnabled(false);
 
       setCounts({
         subway: data.counts.subway,
@@ -363,12 +414,30 @@ export function MapView() {
     setVisibility((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
-  function selectView(id: string | null) {
+  const selectView = useCallback((id: string | null) => {
     setActiveViewId(id);
     const view = id ? getView(id) : null;
     const firstOption = view?.options?.[0]?.id ?? null;
     setActiveOption(firstOption);
-  }
+  }, []);
+
+  // Let the planner chat drive the map: when a goal is submitted, switch to the
+  // view its weights imply and fit the camera to the highlighted neighbourhoods.
+  useEffect(() => {
+    if (!ready) return;
+    return subscribeMapCommand((cmd) => {
+      if (cmd.type !== "applyPlan") return;
+      const map = mapRef.current;
+      const fc = nbhdFcRef.current;
+      if (!map || !fc) return;
+      const action = planToMapAction(cmd.weights, fc);
+      selectView(action.viewId);
+      const bounds = bboxForNums(fc, action.highlightNums);
+      if (bounds) {
+        map.fitBounds(bounds, { padding: 90, duration: 900, maxZoom: 13 });
+      }
+    });
+  }, [ready, selectView]);
 
   function changeOption(optionId: string) {
     const map = mapRef.current;
@@ -408,8 +477,50 @@ export function MapView() {
         onRemove={removeRoute}
         onClear={clearRoutes}
       />
+      {ready && (
+        <MapControls
+          getMap={() => mapRef.current}
+          activeViewId={activeViewId}
+          ready={ready}
+        />
+      )}
+      <NeighbourhoodDrawer
+        feature={selectedNbhd}
+        onClose={() => setSelectedNbhd(null)}
+      />
     </div>
   );
+}
+
+/**
+ * Bounding box `[[west,south],[east,north]]` covering the given neighbourhood
+ * numbers, or null if none match. Used to fit the camera when the planner
+ * focuses on a set of neighbourhoods.
+ */
+function bboxForNums(
+  fc: NeighbourhoodFC,
+  nums: number[],
+): [[number, number], [number, number]] | null {
+  if (nums.length === 0) return null;
+  const want = new Set(nums);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const f of fc.features) {
+    if (!want.has(f.properties.num)) continue;
+    const g = f.geometry;
+    const polys = g.type === "MultiPolygon" ? g.coordinates : [g.coordinates];
+    for (const poly of polys) {
+      for (const [x, y] of poly[0]) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  return maxX > minX ? [[minX, minY], [maxX, maxY]] : null;
 }
 
 /**

@@ -100,10 +100,19 @@ export function recolorChoropleth(
   return breaks;
 }
 
+// When the neighbourhood detail drawer is active it supersedes the small
+// per-view click popups, so the shell disables them to avoid double UI. Hover
+// cursors still work; only the click popup is gated.
+let _popupsEnabled = true;
+export function setChoroplethPopupsEnabled(enabled: boolean): void {
+  _popupsEnabled = enabled;
+}
+
 /**
  * Wire a hover-cursor + click popup for a choropleth fill layer. `format`
  * returns the popup HTML for a clicked neighbourhood's properties. Call once
- * per fill layer in setup().
+ * per fill layer in setup(). The click popup is skipped while popups are
+ * disabled (see setChoroplethPopupsEnabled).
  */
 export function wireChoroplethPopup(
   map: maplibregl.Map,
@@ -118,6 +127,7 @@ export function wireChoroplethPopup(
     map.getCanvas().style.cursor = "";
   });
   map.on("click", fillId, (e: MapLayerMouseEvent) => {
+    if (!_popupsEnabled) return;
     const props = e.features?.[0]?.properties;
     if (!props) return;
     popup.setLngLat(e.lngLat).setHTML(format(props)).addTo(map);
