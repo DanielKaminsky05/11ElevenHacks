@@ -1,6 +1,6 @@
 # TransitRL — Runtime Agent Reliability
 
-How to make the **runtime planning agent** (Nemotron 3 — `nemotron3:33b` via **Ollama** on the GX10, *not* NIM; see §7 and [`backend-hosting-plan.md`](backend-hosting-plan.md)) reliably (1) **interpret** a user's
+How to make the **runtime planning agent** (Nemotron-Nano-9B-v2 via an **NVIDIA NIM** on the DGX Spark / GB10; see §7 and [`backend-hosting-plan.md`](backend-hosting-plan.md)) reliably (1) **interpret** a user's
 chat message, (2) **call the right tools with valid arguments**, and (3) **execute a workflow in
 order without skipping steps or inventing numbers**. This is the execution counterpart to
 [`agent-workflows.md`](agent-workflows.md) (the *what* and the *order*) and
@@ -100,7 +100,7 @@ Most tool-calling errors are selection errors, argument errors, or recovery fail
   applies guided JSON decoding from each tool's schema (eliminates malformed-JSON / out-of-enum
   calls). Use `tool_choice`: `auto` for conversational turns, `required` when the turn is clearly
   actionable, named to force a deterministic first step. *Pin a NIM/model version with a known-good
-  tool parser and verify `parallel_tool_calls` support before relying on it.* **⚠️ On our stack the model is served by Ollama, not NIM, so decode-time guided JSON is NOT guaranteed — see §7 for what changes.**
+  tool parser and verify `parallel_tool_calls` support before relying on it.* **✓ On our stack the model is served by a NIM (Nemotron-Nano-9B-v2 DGX Spark build), so decode-time guided JSON holds — see §7.**
 
 **Design for recovery**
 - **2.9 Validation-error retry loop.** On `ValidationError`, return `.errors()` (which field, what
@@ -207,7 +207,7 @@ output guardrail (§3.6) catches it.
 - [ ] A domain glossary (jargon → metric/boundary id) injected into the router/extractor (§1.5).
 - [ ] Tools namespaced; `simulate_change`/`optimize_layout` docstrings made contrastive (§2.2–2.3).
 - [ ] Every tool arg uses enums/bounds + unit-annotated, provenance-stating field descriptions (§2.5–2.6).
-- [ ] Structured output for `parse_goal` via Ollama `format` (JSON Schema) **or** vLLM guided decoding — we run **Ollama, not NIM**, so there's no free decode-time enforcement; `tool_choice`/`parallel_tool_calls` support verified on Ollama 0.24; model pinned to `nemotron3:33b` (§2.8, §7).
+- [ ] Structured output for `parse_goal` backed by the NIM's decode-time guided JSON (free schema enforcement); `tool_choice`/`parallel_tool_calls` supported; image pinned to `…nemotron-nano-9b-v2-dgx-spark:latest` (§2.8, §7).
 - [ ] Validation-error retry loop with steering messages around every tool (§2.9–2.10).
 - [ ] Route workflow runs through code-level **gates** (diagnose→optimize→attribute→brief) (§3.1–3.2).
 - [ ] Brief schema requires tool-sourced numbers + non-empty `affected_groups`; output guardrail
@@ -217,44 +217,36 @@ output guardrail (§3.6) catches it.
 
 ---
 
-## 7. On-box reality & validated baseline (Ollama, not NIM — 2026-05-31)
+## 7. On-box reality: NIM on DGX Spark (2026-05-31)
 
-This doc was drafted assuming **Nemotron via NIM**. The live GX10 actually serves the model
-through **Ollama 0.24.0** (`nemotron3:33b`, OpenAI-compatible at `http://localhost:11434/v1`,
-pinned `keep_alive=-1`). That's the right call for the Nemotron bounty + co-run headroom (see
-[`backend-hosting-plan.md`](backend-hosting-plan.md)) — but it changes three reliability
-assumptions above. First, the measured baseline (live tool-calling test, `temperature=0`):
+The runtime model is served by an **NVIDIA NIM**, not Ollama — the GB10 build
+`nvcr.io/nim/nvidia/nvidia-nemotron-nano-9b-v2-dgx-spark` (Nemotron-Nano-9B-v2, hybrid
+Mamba-2/Attention, tool-calling), OpenAI-compatible and launched via
+[`backend/scripts/run_nim.sh`](../backend/scripts/run_nim.sh) on **`http://localhost:8001/v1`**
+(port 8000 on the box is taken by an unrelated service). This is the right call for the
+Nemotron bounty + NVIDIA-ecosystem rubric, and — unlike a generic Ollama server — it **restores**
+the decode-time guarantees this doc was drafted around, rather than forcing work-arounds:
 
-- **Tool selection + args correct 3/3** — the model chose `equity_gap_report` vs
-  `compute_accessibility` appropriately, emitted **valid JSON**, and *inferred unstated args from
-  language* (`"on foot"`→`mode:"walk"`, `"within 400 m"`→`threshold_m:400`). So §2's
-  selection/argument risks are **low for our current schemas** — but keep the §5 evals running as
-  the tool count grows and as other tenants on the shared box change what's loaded.
-- **Speed:** ~67–81 tok/s decode, ~2,550 tok/s prefill; a tool turn is **~0.8–1.0 s with
-  `/no_think`** vs **4.8 s** thinking-on → confirms the §3.9 latency policy with real numbers
-  (thinking off for tool-selection/`parse_goal`, on for narration).
+1. **Decode-time guided JSON is back (§2.8).** NIM enforces each tool's JSON Schema at decode via
+   its xgrammar path, so the "eliminates malformed-JSON / out-of-enum calls" guarantee **holds for
+   free**. The §2.9 validation-retry loop stays as defense-in-depth (we already implement it in
+   `parse_goal` and the `/chat` loop), but it is a backstop, not the primary guard.
+2. **`tool_choice` semantics are supported (§2.8).** NIM's OpenAI endpoint honors
+   `tool_choice: "required"`/named and `parallel_tool_calls`. We still prefer the orchestrator
+   gate (§3.2) to enforce "a tool must run" for the fixed-route workflow — but we can lean on
+   `tool_choice` where convenient.
+3. **Version pin (§2.8):** image tag `…-dgx-spark:latest` (`1.0.0-variant`). Re-run the §5
+   trajectory evals if the image tag changes.
 
-**What Ollama-not-NIM changes:**
-
-1. **No decode-time guided JSON by default (affects §2.8).** Ollama doesn't enforce each tool's
-   schema at decode the way NIM's xgrammar path does, so the "eliminates malformed-JSON /
-   out-of-enum calls" guarantee **does not hold for free.** Mitigate, in order: (a) for the
-   structured `parse_goal` step, pass a **JSON Schema via Ollama's `format`** field rather than
-   relying on free-form output; (b) treat the **§2.9 validation-error retry loop as mandatory,
-   not optional**, around every tool call; (c) if structured output proves shaky at scale, serve
-   just the structured/agentic steps via **vLLM + Marlin** (xgrammar guided decoding) — the
-   optional hardening path already in the hosting plan.
-2. **Verify `tool_choice` semantics before relying on them (affects §2.8).** Confirm Ollama
-   0.24's OpenAI endpoint honors `tool_choice: "required"`/named and `parallel_tool_calls`. If it
-   doesn't, **enforce "a tool must run" with the orchestrator gate (§3.2), not `tool_choice`** —
-   which is what we want anyway for the fixed route workflow.
-3. **The §2.8 version pin is `nemotron3:33b` on Ollama 0.24.0** (tool parser validated
-   2026-05-31). Re-run the trajectory evals (§5) if the model tag or Ollama version changes — or
-   if a co-tenant swaps the loaded model out from under us on the shared box.
+**Validation status.** A live tool-calling smoke test (`backend/scripts/nim_smoke_test.py`) plus a
+real `POST /planner` round-trip confirm the model emits parseable `tool_calls`/structured weights
+against our schemas. (An earlier exploratory run on Ollama `nemotron3:33b` got tool selection +
+args correct 3/3 with unstated-arg inference, e.g. `"on foot"`→`mode:"walk"` — evidence the tool
+schemas themselves are well-designed; the NIM is the shipped runtime.)
 
 **Net:** the *structural* defenses in §3 (code-level gates, plan-with-placeholders, the grounding
-mandate, the reflection pass) matter **more** on Ollama, because we can't lean on decode-time
-schema enforcement — they're what keep us reliable without it.
+mandate, the reflection pass) remain the backbone of reliability — and with NIM's decode-time
+schema enforcement layered back on top, §2's malformed-call risks are low for our current schemas.
 
 ## Sources
 

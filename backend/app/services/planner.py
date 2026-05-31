@@ -1,17 +1,27 @@
 """Planner service — translate a plain-English goal into RL reward weights.
 
-Transport-agnostic and pure: no FastAPI, no I/O. The router (and later the agent
-loop) call `plan_goal`. Today this is a deterministic keyword mapper so the app
-runs end-to-end with no model; swap the body of `plan_goal` for a Nemotron NIM
-call (parse the goal into structured weights) when the agent lands — the
-`PlannerResponse` contract stays the same.
+Two paths to the same `PlannerResponse` contract:
+
+  - `plan_goal(goal)` — a deterministic keyword mapper. No model, no I/O, always
+    available. It is the offline fallback and what the unit tests pin.
+  - `plan_goal_model(goal)` — delegates to the registered `parse_goal` tool, which
+    asks the Nemotron NIM to extract a structured `RewardSpec`, then maps that onto
+    the frontend's `RewardWeights`. Falls back to `plan_goal` whenever the model is
+    offline or returns something unusable.
+
+The router calls `plan_goal_model`; the frontend contract is identical either way,
+so the planner-chat UI just gets model-inferred weights when a NIM is live.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
 from app.schemas.planner import PlannerResponse, RewardWeights
+from app.tools.optimization import ParseGoalArgs, parse_goal
+
+logger = logging.getLogger(__name__)
 
 # Each rule: (compiled keyword pattern, channel to boost, boost amount, reason).
 _RULES: list[tuple[re.Pattern[str], str, float, str]] = [
@@ -84,3 +94,54 @@ def plan_goal(goal: str) -> PlannerResponse:
     )
 
     return PlannerResponse(reply=reply, weights=weights)
+
+
+# ---------------------------------------------------------------------------
+# Model-backed path: delegate to the NIM-wired `parse_goal` tool
+# ---------------------------------------------------------------------------
+
+
+def _spec_to_weights(spec: dict) -> RewardWeights:
+    """Map a RewardSpec (from `parse_goal`) onto the frontend's RewardWeights,
+    normalized to sum ~1. The tool uses `*_weight` field names and need not sum
+    to 1; the frontend contract uses bare channel names and does."""
+    return _normalize(
+        {
+            "coverage": float(spec.get("coverage_weight", 0.0)),
+            "travel_time": float(spec.get("travel_weight", 0.0)),
+            "equity": float(spec.get("equity_weight", 0.0)),
+            "constraints": float(spec.get("constraint_weight", 0.0)),
+        }
+    )
+
+
+def _reply_from_spec(spec: dict, weights: RewardWeights) -> str:
+    region = spec.get("region", "Toronto")
+    budget = spec.get("budget", 5)
+    protect = spec.get("protect")
+    protect_note = f" while protecting {protect}" if protect else ""
+    return (
+        f"Got it — for {region} I'll optimize the placement of up to {budget} stops{protect_note}. "
+        f"Reward weights: coverage {weights.coverage}, travel-time {weights.travel_time}, "
+        f"equity {weights.equity}, constraints {weights.constraints}. "
+        f"Run the agent to watch it relocate stops toward this goal."
+    )
+
+
+async def plan_goal_model(goal: str) -> PlannerResponse:
+    """Infer weights via the NIM-backed `parse_goal` tool, falling back to the
+    deterministic keyword mapper if the model is offline or returns nothing usable."""
+    try:
+        result = await parse_goal(ParseGoalArgs(text=goal))
+    except Exception as exc:  # network down, non-OpenAI endpoint, etc.
+        logger.info("parse_goal unavailable (%s); using keyword fallback", exc)
+        return plan_goal(goal)
+
+    if "error" in result or "reward_spec" not in result:
+        # Model returned non-JSON / failed validation — keyword mapping beats flat defaults.
+        logger.info("parse_goal returned no usable spec; using keyword fallback")
+        return plan_goal(goal)
+
+    spec = result["reward_spec"]
+    weights = _spec_to_weights(spec)
+    return PlannerResponse(reply=_reply_from_spec(spec, weights), weights=weights)
