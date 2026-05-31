@@ -67,9 +67,17 @@ export const MAGNITUDE_COLOR: Record<Magnitude, string> = {
   severe: "#f87171",
 };
 
+// The mock catalogue is the 2026 World Cup era, so anchor the feed's window
+// there rather than the machine clock (which may sit outside that range and
+// return nothing). Swap to a live "today" once real feeds are wired in.
+const DEMO_AS_OF = "2026-06-01";
+const DEMO_DAYS_AHEAD = 200;
+
 /** Fetch upcoming events from the same-origin proxy. */
 export async function loadEvents(): Promise<EventsResponse> {
-  const res = await fetch("/api/events");
+  const res = await fetch(
+    `/api/events?as_of=${DEMO_AS_OF}&days_ahead=${DEMO_DAYS_AHEAD}`,
+  );
   if (!res.ok) throw new Error(`Failed to load events (HTTP ${res.status})`);
   return res.json();
 }
