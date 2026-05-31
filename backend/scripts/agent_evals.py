@@ -26,7 +26,10 @@ BATTERY = [
     ("How many people live in Scarborough Village?", "profile_area", "paraphrase"),
     ("Tell me about the Annex.", "profile_area", "paraphrase"),
     ("Compare the population of the Annex and Rexdale.", "compare_areas", "multi-area"),
-    ("What if we add three stops in Malvern?", "simulate_change", "what-if (confusion pair)"),
+    # No exact stop locations given -> the actionable interpretation is "find where",
+    # i.e. optimize_layout. simulate_change needs concrete operations to evaluate.
+    ("What if we add three stops in Malvern?", "optimize_layout", "vague add-N -> placement"),
+    ("Simulate removing the King St & Bathurst stop.", "simulate_change", "concrete op -> simulate"),
     ("Where should we add stops to help low-income areas?", "optimize_layout", "what-should (confusion pair)"),
     ("Which Toronto neighbourhoods are transit deserts?", "equity_gap_report", "diagnose"),
     ("Hi there!", None, "greeting -> no tool"),
