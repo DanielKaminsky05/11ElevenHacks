@@ -1,0 +1,4 @@
+# Large source datasets — organized locally but not tracked.
+# See data/README.md for the layout and original sources.
+/data/*
+!/data/README.md
