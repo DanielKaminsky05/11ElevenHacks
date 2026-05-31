@@ -166,3 +166,50 @@ def test_greeting_uses_no_tool(client, monkeypatch):
     body = client.post("/chat", json={"message": "hi"}).json()
     assert body["steps"] == []
     assert "Toronto" in body["reply"]
+
+
+# 9. Conversation history is replayed so follow-ups have context -------------
+#    Without this, "what is their density" can't resolve "their" — the bug from
+#    the transcript. The prior turns must reach the model between system + new user.
+def test_history_is_replayed_to_model(client, monkeypatch):
+    fake = _patch_nim(monkeypatch, script=["Their density is high."])
+    body = client.post(
+        "/chat",
+        json={
+            "message": "what is their density?",
+            "history": [
+                {"role": "user", "content": "compare the Annex and Rosedale"},
+                {"role": "assistant", "content": "The Annex has 29,300 residents."},
+            ],
+        },
+    ).json()
+    assert body["reply"] == "Their density is high."
+    sent = fake.calls[0]  # the messages handed to the model on the first turn
+    assert sent[0]["role"] == "system"
+    # Prior turns sit between the system prompt and the new user message, in order.
+    assert sent[1] == {"role": "user", "content": "compare the Annex and Rosedale"}
+    assert sent[2] == {"role": "assistant", "content": "The Annex has 29,300 residents."}
+    assert sent[3] == {"role": "user", "content": "what is their density?"}
+
+
+# 10. History is capped so the prompt can't grow unbounded -------------------
+def test_history_is_capped(client, monkeypatch):
+    from app.routers.chat import MAX_HISTORY_TURNS
+
+    fake = _patch_nim(monkeypatch, script=["ok"])
+    extra = 5
+    long_history = [
+        {"role": "user", "content": f"msg {i}"}
+        for i in range(MAX_HISTORY_TURNS + extra)
+    ]
+    client.post("/chat", json={"message": "now", "history": long_history})
+    sent = fake.calls[0]
+    # Layout: system, then exactly MAX_HISTORY_TURNS most-recent turns, then "now".
+    assert sent[0]["role"] == "system"
+    # The oldest `extra` turns were dropped; the window starts at msg {extra}.
+    assert sent[1] == {"role": "user", "content": f"msg {extra}"}
+    assert sent[MAX_HISTORY_TURNS] == {
+        "role": "user",
+        "content": f"msg {MAX_HISTORY_TURNS + extra - 1}",
+    }
+    assert sent[MAX_HISTORY_TURNS + 1] == {"role": "user", "content": "now"}

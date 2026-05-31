@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.agent.nim_client import get_nim_client
 from app.tools import get_tool
@@ -31,6 +31,11 @@ router = APIRouter(tags=["agent"])
 # A tool call can spawn another; cap the loop so a misbehaving model can't spin
 # forever. Each iteration is one model turn (which may request several tools).
 MAX_ITERATIONS = 8
+
+# Keep only the last N prior turns in context. Plenty for resolving "their", "those
+# areas", "compare them" against the recent conversation without bloating the prompt
+# (and the budget) with the entire session on every request.
+MAX_HISTORY_TURNS = 10
 
 # Nemotron's thinking mode otherwise dumps its full reasoning trace into the reply
 # `content` (no <think> tags, so it can't be cleanly stripped). `/no_think` yields a
@@ -66,8 +71,20 @@ SYSTEM_PROMPT = (
 )
 
 
+class ChatTurn(BaseModel):
+    """One prior message in the conversation, replayed so the agent has memory."""
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class ChatRequest(BaseModel):
     message: str
+    history: list[ChatTurn] = Field(
+        default_factory=list,
+        description="Prior conversation turns (oldest first), so follow-ups like "
+        "'their density' resolve against earlier answers. Tool steps are not replayed.",
+    )
 
 
 class ChatStep(BaseModel):
@@ -107,10 +124,12 @@ async def _execute_tool(name: str, raw_args: dict) -> Any:
 async def chat(req: ChatRequest) -> ChatResponse:
     client = get_nim_client()
     schemas = openai_tool_schemas()
-    messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": req.message},
-    ]
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # Replay recent turns so the agent can resolve references to earlier answers
+    # ("their density", "compare those") instead of treating each message as fresh.
+    for turn in req.history[-MAX_HISTORY_TURNS:]:
+        messages.append({"role": turn.role, "content": turn.content})
+    messages.append({"role": "user", "content": req.message})
     steps: list[ChatStep] = []
 
     for _ in range(MAX_ITERATIONS):

@@ -76,11 +76,14 @@ export interface AgentResponse {
  * answer grounded in tool results, plus the tool trace. Hits /api/agent, which
  * proxies the backend's POST /chat loop.
  */
-export async function sendAgent(message: string): Promise<AgentResponse> {
+export async function sendAgent(
+  message: string,
+  history: { role: "user" | "assistant"; content: string }[] = [],
+): Promise<AgentResponse> {
   const res = await fetch("/api/agent", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, history }),
   });
   if (!res.ok) {
     throw new Error(`Agent request failed (HTTP ${res.status})`);

@@ -60,7 +60,9 @@ export function PlannerChat() {
       createdAt: Date.now(),
     };
     const history = messages
-      .filter((m) => m.role !== "system")
+      .filter((m): m is ChatMessage & { role: "user" | "assistant" } =>
+        m.role !== "system",
+      )
       .map((m) => ({ role: m.role, content: m.content }));
 
     setMessages((prev) => [...prev, userMsg]);
@@ -71,7 +73,7 @@ export function PlannerChat() {
       // Ask the grounded agent (real answer + tool trace) and the planner
       // (reward weights that drive the map) in parallel — neither blocks the other.
       const [agentRes, plannerRes] = await Promise.allSettled([
-        sendAgent(text),
+        sendAgent(text, history),
         sendPlannerGoal({ goal: text, history }),
       ]);
 

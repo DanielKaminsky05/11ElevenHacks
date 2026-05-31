@@ -22,8 +22,14 @@ export interface AgentResponse {
   steps: AgentStep[];
 }
 
+/** A prior turn, replayed to the backend so the agent has conversation memory. */
+export interface AgentTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export async function POST(request: Request) {
-  let body: { message?: string };
+  let body: { message?: string; history?: AgentTurn[] };
   try {
     body = await request.json();
   } catch {
@@ -35,11 +41,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing message" }, { status: 400 });
   }
 
+  // Forward only well-formed {role, content} turns; drop anything else so a
+  // malformed client can't 422 the backend's Pydantic validation.
+  const history: AgentTurn[] = Array.isArray(body?.history)
+    ? body.history
+        .filter(
+          (t): t is AgentTurn =>
+            !!t &&
+            (t.role === "user" || t.role === "assistant") &&
+            typeof t.content === "string",
+        )
+        .map((t) => ({ role: t.role, content: t.content }))
+    : [];
+
   try {
     const res = await fetch(`${BACKEND_URL}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, history }),
       // The agent loop may run several tool turns; allow generous time.
       signal: AbortSignal.timeout(120000),
     });

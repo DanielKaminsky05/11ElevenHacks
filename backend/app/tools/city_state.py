@@ -159,6 +159,18 @@ def _find_neighbourhood(name: str) -> Optional[pd.Series]:
     return matches.iloc[0]
 
 
+def _area_km2(geom) -> Optional[float]:
+    """Land area of a neighbourhood polygon, in km².
+
+    Reproject the single polygon to UTM Zone 17N (metres) so `.area` is a true
+    planar area, then convert m² → km². Returns None if the geometry is missing.
+    """
+    if geom is None:
+        return None
+    projected = gpd.GeoSeries([geom], crs="EPSG:4326").to_crs("EPSG:32617")
+    return float(projected.area.iloc[0]) / 1_000_000.0
+
+
 def _get_profile_metric(
     profile_df: pd.DataFrame, metric_substr: str, neighbourhood_name: str
 ) -> Optional[Any]:
@@ -462,6 +474,8 @@ _PROFILE_METRICS_DEFAULT = [
     "median_household_income",
     "pct_low_income",
     "stop_count",
+    "area_km2",
+    "population_density",
 ]
 
 _ALLOWED_METRICS = Literal[
@@ -470,6 +484,8 @@ _ALLOWED_METRICS = Literal[
     "median_household_income",
     "pct_low_income",
     "stop_count",
+    "area_km2",
+    "population_density",
 ]
 
 
@@ -482,16 +498,18 @@ class ProfileAreaArgs(BaseModel):
         description="Neighbourhood or area name (partial, case-insensitive match against Toronto's 158 neighbourhoods).",
     )
     metrics: list[_ALLOWED_METRICS] = Field(
-        default=["population", "median_age", "median_household_income", "pct_low_income", "stop_count"],
-        description="Which metrics to include in the profile.",
+        default_factory=lambda: list(_PROFILE_METRICS_DEFAULT),
+        description="Which metrics to include in the profile. population_density is "
+        "residents per km² (population / land area); area_km2 is the land area.",
         min_length=1,
     )
 
 
 @tool(ProfileAreaArgs)
 def profile_area(args: ProfileAreaArgs) -> dict:
-    """Return a census + transit dossier (population, income, low-income %, stop count) for ONE
-    Toronto neighbourhood by name. Use for "what is the population of X" / "tell me about X".
+    """Return a census + transit dossier (population, income, low-income %, stop count, land
+    area, population density) for ONE Toronto neighbourhood by name. Use for "what is the
+    population/size/density of X" / "tell me about X". population_density is residents per km².
     For multiple areas use compare_areas; for the gridded map view use get_city_grid."""
     row = _find_neighbourhood(args.name)
     if row is None:
@@ -544,6 +562,23 @@ def profile_area(args: ProfileAreaArgs) -> dict:
             )
             within = stops_gdf[stops_gdf.geometry.within(geom)]
             result["stop_count"] = int(len(within))
+
+        elif metric == "area_km2":
+            area = _area_km2(row["geometry"])
+            result["area_km2"] = round(area, 2) if area is not None else None
+
+        elif metric == "population_density":
+            # Residents per km² — derived, so the agent can answer "how dense is X"
+            # instead of fumbling population for density (the bug in the transcript).
+            pop = _get_profile_metric(
+                prof,
+                "Total - Age groups of the population - 25% sample data",
+                nb_name,
+            )
+            area = _area_km2(row["geometry"])
+            result["population_density"] = (
+                round(pop / area, 1) if pop and area else None
+            )
 
     return {
         "matched_name": nb_name,
@@ -706,8 +741,9 @@ class CompareAreasArgs(BaseModel):
         description="List of at least two neighbourhood names to compare (partial, case-insensitive).",
     )
     metrics: list[_ALLOWED_METRICS] = Field(
-        default=["population", "median_age", "median_household_income", "pct_low_income", "stop_count"],
-        description="Metrics to compare across areas.",
+        default_factory=lambda: list(_PROFILE_METRICS_DEFAULT),
+        description="Metrics to compare across areas. Includes area_km2 and "
+        "population_density (residents per km²).",
         min_length=1,
     )
     sort_by: Optional[str] = Field(
