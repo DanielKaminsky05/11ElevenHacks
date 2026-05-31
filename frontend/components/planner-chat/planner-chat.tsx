@@ -12,6 +12,35 @@ import { emitMapCommand } from "@/lib/map-bus";
 let _idSeq = 0;
 const nextId = () => `m${Date.now()}-${_idSeq++}`;
 
+// Human-readable labels for the live "calling <tool>" indicator. Unknown tools
+// fall back to their snake_case id with underscores spaced out (toolLabel).
+const TOOL_LABELS: Record<string, string> = {
+  get_city_grid: "Reading the city grid",
+  profile_area: "Profiling the area",
+  list_transit: "Listing transit",
+  compare_areas: "Comparing areas",
+  compute_accessibility: "Computing accessibility",
+  equity_gap_report: "Analyzing equity gaps",
+  reachability: "Tracing reachability",
+  estimate_demand: "Estimating demand",
+  reliability_report: "Checking reliability",
+  simulate_change: "Simulating the change",
+  diff_scenarios: "Diffing scenarios",
+  constraint_check: "Checking constraints",
+  parse_goal: "Parsing the goal",
+  optimize_layout: "Optimizing stop layout",
+  propose_candidates: "Proposing stops",
+  optimization_status: "Reading optimizer status",
+  who_is_affected: "Finding who's affected",
+  explain_result: "Explaining the result",
+  generate_brief: "Writing the brief",
+  find_upcoming_events: "Finding events",
+  get_event: "Loading the event",
+};
+
+const toolLabel = (tool: string) =>
+  TOOL_LABELS[tool] ?? tool.replace(/_/g, " ");
+
 // Tools whose presence in the agent's trace mean the answer is an actual *plan*
 // (a stop layout / scenario). Only then are reward weights and the map's
 // "apply plan" command relevant — lookups and diagnostic questions shouldn't
@@ -42,12 +71,14 @@ export function PlannerChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([GREETING]);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
+  // The tool the agent is calling right now (shown live with a spinner), or null.
+  const [liveTool, setLiveTool] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Keep the latest message in view.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, pending]);
+  }, [messages, pending, liveTool]);
 
   async function submitGoal(goal: string) {
     const text = goal.trim();
@@ -72,8 +103,12 @@ export function PlannerChat() {
     try {
       // Ask the grounded agent (real answer + tool trace) and the planner
       // (reward weights that drive the map) in parallel — neither blocks the other.
+      // The agent streams its tool calls; surface the in-flight one live.
       const [agentRes, plannerRes] = await Promise.allSettled([
-        sendAgent(text, history),
+        sendAgent(text, history, (event) => {
+          if (event.type === "tool") setLiveTool(event.tool);
+          else if (event.type === "done") setLiveTool(null);
+        }),
         sendPlannerGoal({ goal: text, history }),
       ]);
 
@@ -131,6 +166,7 @@ export function PlannerChat() {
       ]);
     } finally {
       setPending(false);
+      setLiveTool(null);
     }
   }
 
@@ -175,12 +211,24 @@ export function PlannerChat() {
           <MessageBubble key={m.id} message={m} />
         ))}
 
-        {pending && (
-          <div className="flex items-center gap-1.5 px-1 text-[12px] text-[#7e93b5]">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-300" />
-            Planning…
-          </div>
-        )}
+        {pending &&
+          (liveTool ? (
+            <div className="flex items-center gap-2 px-1 text-[12px] text-[#9fb4d6]">
+              <span className="h-3.5 w-3.5 flex-none animate-spin rounded-full border-2 border-sky-300/25 border-t-sky-300" />
+              <span>
+                Calling{" "}
+                <span className="font-medium text-sky-200">
+                  {toolLabel(liveTool)}
+                </span>
+                …
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 px-1 text-[12px] text-[#7e93b5]">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-300" />
+              Planning…
+            </div>
+          ))}
 
         {messages.length <= 1 && !pending && (
           <div className="space-y-1.5 pt-1">

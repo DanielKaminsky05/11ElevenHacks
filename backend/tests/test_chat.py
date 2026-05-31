@@ -234,3 +234,51 @@ def test_history_is_capped(client, monkeypatch):
         "content": f"msg {MAX_HISTORY_TURNS + extra - 1}",
     }
     assert sent[MAX_HISTORY_TURNS + 1] == {"role": "user", "content": "now"}
+
+
+# 11. The streaming endpoint emits a `tool` event per call, then a `done` event --
+#     This is what lets the UI show each tool call live (a spinner + the tool name)
+#     instead of waiting for the whole loop to finish.
+def _sse_events(text: str) -> list[dict]:
+    """Parse a Server-Sent Events body into the list of decoded `data:` payloads."""
+    return [
+        json.loads(line[len("data:") :].strip())
+        for line in text.splitlines()
+        if line.startswith("data:")
+    ]
+
+
+def test_chat_stream_emits_tool_then_done(client, monkeypatch):
+    _patch_nim(
+        monkeypatch,
+        script=[
+            [("find_upcoming_events", EVENTS_ARGS)],
+            "There are major events this summer.",
+        ],
+    )
+    resp = client.post("/chat/stream", json={"message": "events?"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    events = _sse_events(resp.text)
+    # A tool event fires before the result is known (so the UI can show it live)...
+    assert events[0] == {
+        "type": "tool",
+        "tool": "find_upcoming_events",
+        "arguments": EVENTS_ARGS,
+    }
+    # ...then a single done event carries the final reply + full trace.
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["reply"] == "There are major events this summer."
+    assert [s["tool"] for s in done["steps"]] == ["find_upcoming_events"]
+    assert done["steps"][0]["result"]["count"] > 0
+
+
+def test_chat_stream_greeting_has_no_tool_events(client, monkeypatch):
+    _patch_nim(monkeypatch, script=["Hi! I analyze Toronto transit."])
+    resp = client.post("/chat/stream", json={"message": "hi"})
+    events = _sse_events(resp.text)
+    assert all(e["type"] != "tool" for e in events)
+    assert events[-1]["type"] == "done"
+    assert events[-1]["steps"] == []

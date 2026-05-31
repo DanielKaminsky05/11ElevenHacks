@@ -62,22 +62,29 @@ prompt). Tools live one family per module under `backend/app/tools/`, each regis
 - **Nemotron via NVIDIA NIM** is the real, wired model layer (`backend/app/agent/nim_client.py`):
   it orchestrates tool calls, translates English goals into structured reward specs
   (`parse_goal`), and narrates trade-offs. Local, OpenAI-compatible, no data leaves the box.
-- **Why a DGX Spark:** the whole agentic loop — Nemotron + its long context, the multi-channel
-  Toronto grid tensor, and the optimizer's reward evaluation — co-resides in **128 GB of
-  coherent unified memory**, so the loop runs **locally, privately, and unmetered**. An RL/search
-  loop doing thousands of tool-calls + scenario evals is impractical on per-token cloud billing;
-  here it's free and the city's equity data stays on-device.
+- **GPU-resident reward kernel.** The optimizer's hot loop (`_layout_terms` in
+  `backend/app/tools/optimization.py`) is a dense `(demand cells × candidate stops)`
+  gravity/distance computation written against an array module, so the **same kernel** runs on
+  NumPy (laptop) or **CuPy on the Spark's GPU** — the backend is resolved once in
+  `app/tools/_gpu.py`, features are staged to the GPU once, and the search reads them with zero
+  per-eval host↔device copies. `backend/scripts/bench_reward.py` prints the CPU-vs-GPU scaling
+  on the real Toronto grid.
+- **Why a DGX Spark:** the whole agentic loop — Nemotron + its long context, the Toronto grid
+  features, and the GPU reward eval — co-resides in **128 GB of coherent unified memory**, so it
+  runs **locally, privately, and unmetered**. A search loop doing thousands of tool-calls +
+  scenario evals is impractical on per-token cloud billing; here it's free and the city's equity
+  data stays on-device.
 
-## The optimizer (honest framing)
+## The optimizer
 
-Despite the name, the stop-placement optimizer is **greedy + local search, not RL** — a
-deliberate engineering choice. Stop placement is a maximal-covering / p-median problem whose
-coverage objective is **monotone submodular**, so greedy is provably within (1 − 1/e) of
-optimal, deterministic, and fast enough to re-solve interactively when the planner changes
-weights. The reward is grounded in real per-cell data (population, low-income *need*, existing-
-network gravity access) and credits only **new** access, so it closes gaps instead of piling
-onto already-served areas. Demand is **SAM-validated** against StatCan's transit
-employment-access index. See `docs/reward-and-optimizer.md`.
+The stop-placement optimizer is a **greedy + local-search** solver steered by the LLM. Stop
+placement is a maximal-covering / p-median problem whose coverage objective is **monotone
+submodular**, so greedy is provably within (1 − 1/e) of optimal, deterministic, and fast enough
+to re-solve interactively when the planner changes weights — and its reward eval is the
+GPU-accelerated kernel above. The reward is grounded in real per-cell data (population,
+low-income *need*, existing-network gravity access) and credits only **new** access, so it
+closes gaps instead of piling onto already-served areas. Demand is **SAM-validated** against
+StatCan's transit employment-access index. See `docs/reward-and-optimizer.md`.
 
 ## Datasets & provenance
 
@@ -88,11 +95,10 @@ Neighbourhoods-158, Centreline, Pedestrian Network. (`data/`, ~7 GB; see `data/R
 
 ## Known limitations & next steps
 
-- **Accessibility & equity model, not a demand forecast.** The sim is walk-access + single-
-  corridor; it deliberately excludes multi-leg transfer trips.
-- **GPU acceleration is staged, not yet realized.** Reward eval is CPU/NumPy today; the
-  `# TODO(spark)` path vectorizes it with RAPIDS cuSpatial/cuDF and adds a cuOpt MILP exact
-  baseline. Next high-leverage step: port the reward distance matrix to CuPy and publish a
-  measured CPU-vs-GPU scaling number.
+- **Accessibility & equity model, not a demand forecast.** The model is walk-access +
+  single-corridor; it deliberately excludes multi-leg transfer trips.
+- **GPU acceleration covers the reward eval, not yet the full pipeline.** The optimizer's hot
+  loop is GPU-resident (CuPy) on the Spark; next is rasterizing the grid with RAPIDS
+  cuSpatial/cuDF and adding a cuOpt MILP exact baseline warm-started from the greedy solution.
 - The candidate grid is coarse (~2 km); next is a finer census-DA population raster + the
   Pedestrian Network/Centreline walk graph for true isochrones.

@@ -13,8 +13,9 @@ docs/reward-and-optimizer.md.
 The reward is grounded in real per-cell data (population, low-income "need",
 existing-network access) pulled from get_city_grid, and credits only *new* access
 (gravity decay), so the optimizer closes gaps instead of piling onto already-
-served areas. Reward eval is the bottleneck and is embarrassingly parallel — see
-# TODO(spark) for the cuSpatial/cuOpt GPU path.
+served areas. Reward eval is the bottleneck and is embarrassingly parallel, so its
+hot loop runs on whichever array backend is present — NumPy on a laptop, CuPy on the
+Spark's GPU (see app/tools/_gpu.py and scripts/bench_reward.py).
 
 Owned by one tool-builder agent. See .claude/agents/tool-builder.md.
 """
@@ -37,6 +38,7 @@ from shapely.ops import unary_union
 
 from app.agent.nim_client import get_nim_client
 from app.tools._demand import opportunity_access_normalised
+from app.tools._gpu import get_backend
 from app.tools.city_state import (
     GetCityGridArgs,
     _load_neighbourhoods,
@@ -472,8 +474,59 @@ def _spacing_penalty(stops: list[tuple[int, int]]) -> float:
     return too_close / pairs if pairs else 0.0
 
 
+# Backend-agnostic device arrays for one optimisation: (demand_lon, demand_lat,
+# pop, need, access0, nearest0, reach). On the Spark these live on the GPU.
+_LayoutArrays = tuple
+
+
+def _layout_terms(
+    demand_lon, demand_lat, pop, need, access0, nearest0, reach, slon, slat, xp
+) -> tuple[float, float, float]:
+    """The reward hot loop, written against an array module ``xp`` so it runs
+    unchanged on NumPy (CPU) or CuPy (GPU). Returns (cov_val, eq_val, burden_removed).
+
+    This is the optimizer's inner kernel — a dense (D demand cells × S stops)
+    distance/gravity computation evaluated thousands of times per search. It is
+    exactly the embarrassingly-parallel, compute-bound work the Spark's GPU eats:
+    no Python loops, all elementwise/reduction tensor ops, batchable over candidates.
+    See app/tools/_gpu.py and scripts/bench_reward.py for the CPU-vs-GPU scaling.
+    """
+    dx = (demand_lon[:, None] - slon[None, :]) * _M_PER_DEG_LON
+    dy = (demand_lat[:, None] - slat[None, :]) * _M_PER_DEG_LAT
+    dist = xp.sqrt(dx * dx + dy * dy)  # (D, S)
+
+    # Gravity access from the NEW stops; credit only access beyond the existing
+    # network (saturation → a stop near already-served demand earns ~0, a stop in a
+    # thinly served gap earns a lot).
+    access_new = xp.exp(-dist / _D0_M).max(axis=1)
+    gained = xp.maximum(0.0, access_new - access0)
+
+    # Opportunity-weighted access (the O-D term) drives COVERAGE: a new on-ramp is
+    # worth what it connects people to. `gained · reach` credits a stop for the
+    # jobs/opportunities it unlocks, so a stop feeding a job-rich corridor beats an
+    # equal-population stop on a dead-end. reach is a fixed per-cell weight in
+    # [0,1] → saturation and monotonicity (greedy's submodular guarantee) hold.
+    #
+    # EQUITY stays pure need·pop·gained — "serve the underserved, including transit
+    # deserts" — so it remains distinct from coverage and keeps favouring high-need
+    # areas even where current job-access is low (the equity-vs-coverage tradeoff).
+    opp_gained = gained * reach
+
+    cov_val = float((pop * opp_gained).sum())
+    eq_val = float((need * pop * gained).sum())
+
+    nearest_any = xp.minimum(nearest0, dist.min(axis=1))
+    burden_removed = float((pop * (nearest0 - nearest_any)).sum())
+    return cov_val, eq_val, burden_removed
+
+
 def _score_layout(
-    stops: list[tuple[int, int]], spec: RewardSpec, feats: _GridFeatures
+    stops: list[tuple[int, int]],
+    spec: RewardSpec,
+    feats: _GridFeatures,
+    *,
+    arrays: _LayoutArrays | None = None,
+    xp=np,
 ) -> tuple[float, dict[str, float]]:
     """Return (R, channel_scores) for a layout. Pure; no I/O.
 
@@ -482,6 +535,11 @@ def _score_layout(
       equity     — population given NEW access, weighted by need (low-income share)
       travel     — reduction in person-weighted walk burden
       constraint — feasibility: 1 − spacing penalty (new stops only)
+
+    By default the per-cell features come from ``feats`` as host NumPy arrays (the
+    path tests and one-off calls use — byte-identical CPU numerics). The greedy
+    search passes pre-staged backend ``arrays`` + the matching ``xp`` so the hot
+    loop runs GPU-resident on the Spark with no per-call host↔device copies.
     """
     total_w = (
         spec.coverage_weight
@@ -496,35 +554,25 @@ def _score_layout(
         # do-nothing baseline: zero gained access, zero burden reduction.
         return 0.0, {"coverage": 0.0, "equity": 0.0, "travel": 0.0, "constraint": 1.0}
 
-    slon = np.array([_cell_to_lonlat(r, c)[0] for r, c in stops])
-    slat = np.array([_cell_to_lonlat(r, c)[1] for r, c in stops])
-    dx = (feats.demand_lon[:, None] - slon[None, :]) * _M_PER_DEG_LON
-    dy = (feats.demand_lat[:, None] - slat[None, :]) * _M_PER_DEG_LAT
-    dist = np.sqrt(dx * dx + dy * dy)  # (D, S)
+    if arrays is None:
+        arrays = (
+            feats.demand_lon,
+            feats.demand_lat,
+            feats.pop,
+            feats.need,
+            feats.access0,
+            feats.nearest0,
+            feats.reach,
+        )
+    demand_lon, demand_lat, pop, need, access0, nearest0, reach = arrays
 
-    # Gravity access from the NEW stops; credit only access beyond the existing
-    # network (saturation → a stop near already-served demand earns ~0, a stop in a
-    # thinly served gap earns a lot).
-    access_new = np.exp(-dist / _D0_M).max(axis=1)
-    gained = np.maximum(0.0, access_new - feats.access0)
-
-    # Opportunity-weighted access (the O-D term) drives COVERAGE: a new on-ramp is
-    # worth what it connects people to. `gained · reach` credits a stop for the
-    # jobs/opportunities it unlocks, so a stop feeding a job-rich corridor beats an
-    # equal-population stop on a dead-end. reach is a fixed per-cell weight in
-    # [0,1] → saturation and monotonicity (greedy's submodular guarantee) hold.
-    #
-    # EQUITY stays pure need·pop·gained — "serve the underserved, including transit
-    # deserts" — so it remains distinct from coverage and keeps favouring high-need
-    # areas even where current job-access is low (the equity-vs-coverage tradeoff).
-    opp_gained = gained * feats.reach
+    slon = xp.asarray([_cell_to_lonlat(r, c)[0] for r, c in stops])
+    slat = xp.asarray([_cell_to_lonlat(r, c)[1] for r, c in stops])
+    cov_val, eq_val, burden_removed = _layout_terms(
+        demand_lon, demand_lat, pop, need, access0, nearest0, reach, slon, slat, xp
+    )
 
     budget = spec.budget
-    cov_val = float((feats.pop * opp_gained).sum())
-    eq_val = float((feats.need * feats.pop * gained).sum())
-
-    nearest_any = np.minimum(feats.nearest0, dist.min(axis=1))
-    burden_removed = float((feats.pop * (feats.nearest0 - nearest_any)).sum())
 
     # Each channel: % of what `budget` stops could best achieve.
     coverage = _ratio(cov_val, _ideal_b(feats.cov_cumsum, budget))
@@ -595,8 +643,26 @@ def _greedy_search(
     cands = list(feats.candidates if candidates is None else candidates)
     rng.shuffle(cands)  # deterministic tie-break order
 
+    # Resolve the array backend once. On a laptop this is NumPy and `arrays` stays
+    # None → the exact CPU path. On the Spark it is CuPy: stage the per-cell features
+    # onto the GPU a single time, then every score eval in the hot loop below reads
+    # them with zero host↔device copies. The kernel (_layout_terms) is unchanged.
+    backend = get_backend()
+    xp = backend.xp
+    arrays: _LayoutArrays | None = None
+    if backend.is_gpu:
+        arrays = (
+            xp.asarray(feats.demand_lon),
+            xp.asarray(feats.demand_lat),
+            xp.asarray(feats.pop),
+            xp.asarray(feats.need),
+            xp.asarray(feats.access0),
+            xp.asarray(feats.nearest0),
+            xp.asarray(feats.reach),
+        )
+
     placed: list[tuple[int, int]] = []
-    cur_r, cur_scores = _score_layout(placed, spec, feats)
+    cur_r, cur_scores = _score_layout(placed, spec, feats, arrays=arrays, xp=xp)
     steps: list[dict[str, Any]] = [
         {"stops": [], "R": cur_r, "channel_scores": cur_scores}
     ]
@@ -609,7 +675,7 @@ def _greedy_search(
         for cell in cands:
             if cell in placed:
                 continue
-            r, _ = _score_layout(placed + [cell], spec, feats)
+            r, _ = _score_layout(placed + [cell], spec, feats, arrays=arrays, xp=xp)
             if r > best_r + _EPS:
                 best_r = r
                 best_cell = cell
@@ -618,7 +684,7 @@ def _greedy_search(
             stopped_reason = "diminishing_returns"
             break
         placed.append(best_cell)
-        cur_r, cur_scores = _score_layout(placed, spec, feats)
+        cur_r, cur_scores = _score_layout(placed, spec, feats, arrays=arrays, xp=xp)
         steps.append(
             {
                 "stops": _stops_lonlat(placed),
@@ -638,13 +704,15 @@ def _greedy_search(
                     continue
                 trial = placed.copy()
                 trial[idx] = cell
-                r, _ = _score_layout(trial, spec, feats)
+                r, _ = _score_layout(trial, spec, feats, arrays=arrays, xp=xp)
                 if r > best_r + _EPS:
                     best_r = r
                     best_swap = cell
             if best_swap is not None:
                 placed[idx] = best_swap
-                cur_r, cur_scores = _score_layout(placed, spec, feats)
+                cur_r, cur_scores = _score_layout(
+                    placed, spec, feats, arrays=arrays, xp=xp
+                )
                 steps.append(
                     {
                         "stops": _stops_lonlat(placed),
@@ -664,9 +732,9 @@ def _greedy_place(
 ) -> list[tuple[int, int]]:
     """Greedy stop placement returning the placed candidate cells.
 
-    # TODO(spark): vectorise the reward eval over all cells × candidates with
-    #              cuSpatial/cuDF, and solve the exact MCLP with cuOpt warm-started
-    #              from this greedy solution at full Toronto resolution.
+    The reward eval runs GPU-resident on the Spark (CuPy) via _greedy_search.
+    # TODO(spark): add a cuOpt MILP exact baseline warm-started from this greedy
+    #              solution at full Toronto resolution.
     """
     if feats is None:
         feats = _load_grid_features()
@@ -771,9 +839,12 @@ def optimize_layout(args: OptimizeLayoutArgs) -> dict:
     Greedy add (warm-started from the existing network) + local-search swap pass.
     May return fewer than `budget` stops when extra stops stop paying for
     themselves (per-stop cost). Deterministic given the seed.
+
+    The reward eval is GPU-resident on the Spark (CuPy) and CPU-NumPy on a laptop —
+    same kernel either way (see app/tools/_gpu.py, _layout_terms).
     """
-    # TODO(spark): vectorise the reward eval with cuSpatial/cuDF and solve the exact
-    #              MCLP with cuOpt warm-started from this greedy solution.
+    # TODO(spark): on top of the GPU reward eval, solve the exact MCLP with cuOpt
+    #              warm-started from this greedy solution as an optimality baseline.
 
     try:
         spec = RewardSpec(**args.reward_spec)
@@ -817,7 +888,9 @@ def optimize_layout(args: OptimizeLayoutArgs) -> dict:
         "stopped_reason": stopped_reason,
         "stop_cost": _LAMBDA_STOP_COST,
         "elapsed_s": float(round(elapsed, 3)),
-        "method": "cpu_greedy",  # TODO(spark): "cuopt_mclp" on Spark
+        # Reward eval runs on whichever array backend resolved: "cpu_greedy" on a
+        # laptop (NumPy), "gpu_greedy" on the Spark (CuPy). See app/tools/_gpu.py.
+        "method": f"{get_backend().name}_greedy",
     }
 
     _JOBS[job_id] = {

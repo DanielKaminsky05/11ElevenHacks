@@ -1,12 +1,18 @@
 // Conversational agent endpoint — proxies the browser to the backend's
-// tool-calling agent (POST /chat). Unlike /api/chat (the planner: goal -> reward
-// weights for the map), this answers Toronto transit *questions* by calling tools
-// and grounding every figure in real data, and returns the answer plus the tool
-// trace (so the UI can show "via profile_area" provenance, or react to a step).
+// tool-calling agent (POST /chat/stream). Unlike /api/chat (the planner: goal ->
+// reward weights for the map), this answers Toronto transit *questions* by calling
+// tools and grounding every figure in real data.
+//
+// It streams the backend's Server-Sent Events straight through: a `tool` event the
+// moment the model calls each tool (so the UI shows the call live), then a final
+// `done` event with the answer + full step trace.
 //
 // Backend URL comes from BACKEND_URL (server-only env), same as /api/chat.
 
 import { NextResponse } from "next/server";
+
+// SSE must not be statically cached or buffered — render per request.
+export const dynamic = "force-dynamic";
 
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:9001";
 
@@ -55,20 +61,27 @@ export async function POST(request: Request) {
     : [];
 
   try {
-    const res = await fetch(`${BACKEND_URL}/chat`, {
+    const res = await fetch(`${BACKEND_URL}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, history }),
       // The agent loop may run several tool turns; allow generous time.
       signal: AbortSignal.timeout(120000),
     });
-    if (!res.ok) {
+    if (!res.ok || !res.body) {
       return NextResponse.json(
         { error: `backend returned ${res.status}` },
         { status: 502 },
       );
     }
-    return NextResponse.json((await res.json()) as AgentResponse);
+    // Pipe the SSE stream straight through to the browser, unbuffered.
+    return new Response(res.body, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
   } catch {
     return NextResponse.json(
       { error: "TransitRL backend unreachable" },

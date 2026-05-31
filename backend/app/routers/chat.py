@@ -15,9 +15,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agent.nim_client import get_nim_client
@@ -170,8 +172,19 @@ async def _execute_tool(name: str, raw_args: dict) -> Any:
     return await run_tool(spec, args)
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+async def _run_chat(req: ChatRequest) -> AsyncIterator[dict]:
+    """Drive the tool-calling loop, yielding one event per stage so callers can
+    react as the pipeline runs (rather than only at the end):
+
+    - ``{"type": "tool", "tool", "arguments"}`` — emitted *before* a tool runs, so
+      a UI can show a live "calling <tool>" indicator while it (and the next model
+      turn) executes.
+    - ``{"type": "done", "reply", "steps"}`` — the final answer plus the full
+      step trace (each step's tool, arguments, result).
+
+    Both ``/chat`` (collected into one response) and ``/chat/stream`` (Server-Sent
+    Events) consume this, so the loop logic lives in exactly one place.
+    """
     client = get_nim_client()
     schemas = openai_tool_schemas()
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -197,7 +210,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
         messages.append(msg)
 
         if not tool_calls:
-            return ChatResponse(reply=msg.get("content") or "", steps=steps)
+            yield {
+                "type": "done",
+                "reply": msg.get("content") or "",
+                "steps": [s.model_dump() for s in steps],
+            }
+            return
 
         for tc in tool_calls:
             name = tc["function"]["name"]
@@ -205,6 +223,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
                 raw_args = json.loads(tc["function"].get("arguments") or "{}")
             except json.JSONDecodeError:
                 raw_args = {}
+            # Announce the call before running it so the UI shows it live.
+            yield {"type": "tool", "tool": name, "arguments": raw_args}
             result = await _execute_tool(name, raw_args)
             steps.append(ChatStep(tool=name, arguments=raw_args, result=result))
             messages.append(
@@ -217,7 +237,38 @@ async def chat(req: ChatRequest) -> ChatResponse:
             )
 
     logger.warning("chat loop hit MAX_ITERATIONS=%d without a final answer", MAX_ITERATIONS)
-    return ChatResponse(
-        reply="(stopped: reached the tool-call limit without a final answer)",
-        steps=steps,
+    yield {
+        "type": "done",
+        "reply": "(stopped: reached the tool-call limit without a final answer)",
+        "steps": [s.model_dump() for s in steps],
+    }
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    """Run the agent loop and return the final answer + full step trace at once."""
+    reply = ""
+    steps: list[ChatStep] = []
+    async for event in _run_chat(req):
+        if event["type"] == "done":
+            reply = event["reply"]
+            steps = [ChatStep(**s) for s in event["steps"]]
+    return ChatResponse(reply=reply, steps=steps)
+
+
+@router.post("/chat/stream")
+async def chat_stream(req: ChatRequest) -> StreamingResponse:
+    """Same loop as ``/chat``, streamed as Server-Sent Events: a ``tool`` event
+    fires the moment the model calls each tool (so the UI can show it live), then
+    a final ``done`` event carries the reply + full step trace."""
+
+    async def event_stream() -> AsyncIterator[str]:
+        async for event in _run_chat(req):
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        # Defeat proxy/Next buffering so events reach the browser as they happen.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
