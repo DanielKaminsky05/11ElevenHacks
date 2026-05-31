@@ -6,6 +6,7 @@
 - [Agent Tools & MCP Layer](docs/agent-tools.md) — the unified vision: how datasets map to the tools the AI agent calls via MCP, and how they compose.
 - [Map Data Layer Catalog](docs/data-layer.md) — datasets for the map/data layer, by grid channel, plus what's already in `data/`.
 - [Agent Orchestration Playbook](docs/agent-orchestration.md) — how to run Claude Code coding sub-agents (esp. in parallel) so they follow instructions.
+- [Runtime Agent Reliability](docs/agent-reliability.md) — how the Nemotron agent reliably interprets chat, calls tools correctly, and executes workflows in order.
 - [Next.js Best Practices](docs/best-practices/nextjs.md) — conventions for the Next.js frontend.
 - [FastAPI Best Practices](docs/best-practices/fastapi.md) — conventions for the Python backend (runs on the Spark).
 - [Testing Best Practices](docs/best-practices/testing.md) — how to write and maintain tests.
