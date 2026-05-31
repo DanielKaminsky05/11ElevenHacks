@@ -168,6 +168,27 @@ def test_greeting_uses_no_tool(client, monkeypatch):
     assert "Toronto" in body["reply"]
 
 
+# 8b. A textual tool call (Nemotron leak) is salvaged and run ----------------
+#     The model emits `<TOOLCALL>[...]</TOOLCALL>` as content instead of a
+#     structured tool_calls field; the loop must parse it, run the tool, and never
+#     leak the raw markup to the user.
+def test_textual_toolcall_is_salvaged(client, monkeypatch):
+    _patch_nim(
+        monkeypatch,
+        script=[
+            '<TOOLCALL>[{"name": "find_upcoming_events", "arguments": '
+            '{"as_of": "2026-06-01", "days_ahead": 60}}]</TOOLCALL>',
+            "Found the events.",
+        ],
+    )
+    body = client.post("/chat", json={"message": "events?"}).json()
+    assert body["reply"] == "Found the events."
+    assert len(body["steps"]) == 1
+    assert body["steps"][0]["tool"] == "find_upcoming_events"
+    assert body["steps"][0]["result"]["count"] > 0
+    assert "<TOOLCALL>" not in body["reply"]
+
+
 # 9. Conversation history is replayed so follow-ups have context -------------
 #    Without this, "what is their density" can't resolve "their" — the bug from
 #    the transcript. The prior turns must reach the model between system + new user.

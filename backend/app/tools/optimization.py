@@ -40,6 +40,7 @@ from app.tools._demand import opportunity_access_normalised
 from app.tools.city_state import (
     GetCityGridArgs,
     _load_neighbourhoods,
+    _resolve_neighbourhood_name,
     get_city_grid,
 )
 from app.tools.registry import tool
@@ -245,9 +246,15 @@ def _region_polygon(region: str):
     lower = region.strip().lower()
     mask = gdf["AREA_NAME"].str.lower().str.contains(lower, regex=False)
     matches = gdf[mask]
-    if matches.empty:
+    if not matches.empty:
+        return unary_union(list(matches.geometry.values))
+    # No substring hit — tolerate a misspelling by snapping to the closest name
+    # (e.g. "Clanton Rock" → "Clanton Park") so placement still targets the right
+    # area instead of silently falling back to city-wide.
+    canonical = _resolve_neighbourhood_name(region)
+    if canonical is None:
         return None
-    return unary_union(list(matches.geometry.values))
+    return unary_union(list(gdf[gdf["AREA_NAME"] == canonical].geometry.values))
 
 
 def _region_candidates(

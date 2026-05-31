@@ -16,11 +16,25 @@ import json
 import httpx
 
 
+# Low sampling temperature: this is a tool-calling agent, so we want the SAME
+# correct tool chosen every run, not creative variety. Near-greedy decoding makes
+# routing reproducible (so pass^k ≈ pass^1) and is the main lever against the
+# run-to-run flakiness the eval battery exposes.
+_DEFAULT_TEMPERATURE = 0.15
+
+
 class NIMClient:
-    def __init__(self, base_url: str, model: str, timeout: float = 120.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = 120.0,
+        temperature: float = _DEFAULT_TEMPERATURE,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.temperature = temperature
 
     async def chat(
         self,
@@ -28,7 +42,11 @@ class NIMClient:
         tools: list[dict] | None = None,
     ) -> dict:
         """One chat-completions round trip. Returns the raw JSON response."""
-        payload: dict = {"model": self.model, "messages": messages}
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
         if tools:
             payload["tools"] = tools
         async with httpx.AsyncClient(timeout=self.timeout) as client:

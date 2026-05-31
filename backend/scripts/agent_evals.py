@@ -29,6 +29,13 @@ BATTERY = [
     # No exact stop locations given -> the actionable interpretation is "find where",
     # i.e. optimize_layout. simulate_change needs concrete operations to evaluate.
     ("What if we add three stops in Malvern?", "optimize_layout", "vague add-N -> placement"),
+    # Imperative add-N on an OBSCURE (but real) neighbourhood: the model must pass the
+    # name to the tool (which fuzzy-matches all 158) and act on default weights — not
+    # second-guess the name or demand a "priority goal". Reproduces the stall transcript.
+    ("Add 3 bus stops in Clanton Park.", "optimize_layout", "imperative add-N, obscure name -> act"),
+    ("Add 3 bus stops in Oakdale-Beverley Heights.", "optimize_layout", "imperative add-N, obscure name -> act"),
+    # Misspelled region: fuzzy match should snap it to a real neighbourhood and act.
+    ("Add 3 bus stops in Clanton Rock.", "optimize_layout", "misspelled name -> fuzzy match + act"),
     ("Simulate removing the King St & Bathurst stop.", "simulate_change", "concrete op -> simulate"),
     ("Where should we add stops to help low-income areas?", "optimize_layout", "what-should (confusion pair)"),
     ("Which Toronto neighbourhoods are transit deserts?", "equity_gap_report", "diagnose"),

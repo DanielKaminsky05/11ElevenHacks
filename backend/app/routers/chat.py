@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter
@@ -49,9 +50,12 @@ SYSTEM_PROMPT = (
     "'how many', 'tell me about <neighbourhood>' — call profile_area (or get_city_grid "
     "for the gridded/map view).\n"
     "- Adding/placing N stops in an area WITHOUT exact locations ('add 3 stops in "
-    "Malvern', 'where should stops go') -> optimize_layout (region + budget=N); it "
-    "decides where. Use simulate_change ONLY when the user gives specific stop locations "
-    "or operations to evaluate.\n"
+    "Malvern', 'where should stops go') -> call optimize_layout right away with that "
+    "region and budget=N. Naming an area and a count is ENOUGH: the weights default to a "
+    "balanced mix, so do NOT ask for a 'priority goal', weights, or 'budget constraints' "
+    "— set non-default weights only if the user stated a priority (e.g. 'for low-income'). "
+    "Use simulate_change ONLY when the user gives specific stop locations or operations to "
+    "evaluate.\n"
     "- Finding gaps/deserts -> the diagnostics tools (equity_gap_report, "
     "compute_accessibility).\n"
     "- Greetings or capability questions ('hi', 'what can you do') -> answer directly, "
@@ -65,8 +69,14 @@ SYSTEM_PROMPT = (
     "from the data, instead.\n"
     "- If you do not have the data, call the tool. Do not answer from memory or estimate.\n"
     "- Resolve the area with profile_area/get_city_grid before any area-specific claim.\n\n"
-    "DON'T STALL: if a request is actionable but missing a detail, pick a sensible default "
-    "and state it, or ask ONE brief question — never just describe what you would need.\n\n"
+    "DON'T STALL — bias to action:\n"
+    "- If a request is actionable, act with a sensible default and state it; don't just "
+    "describe what you would need. Ask at most ONE brief question, and never re-ask "
+    "something already asked this conversation — act instead.\n"
+    "- Don't second-guess Toronto place names. Pass the name the planner gave straight to "
+    "the tool — it fuzzy-matches all 158 neighbourhoods and errors only if there's truly no "
+    "match. Treat an unfamiliar name as real and call the tool; clarify a name ONLY after a "
+    "tool reports no match.\n\n"
     "Once you have the evidence, give a concise answer."
 )
 
@@ -98,6 +108,46 @@ class ChatStep(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     steps: list[ChatStep] = []
+
+
+# Nemotron sometimes emits a tool call inline as text — e.g.
+# `<TOOLCALL>[{"name": ..., "arguments": {...}}]</TOOLCALL>` — instead of via the
+# structured `tool_calls` field. Without salvage the loop runs no tool and the raw
+# markup leaks to the user. Matches <TOOLCALL>/<tool_call>/<toolcall> case-insensitively.
+_TOOLCALL_RE = re.compile(
+    r"<\s*tool_?call\s*>(.*?)<\s*/\s*tool_?call\s*>", re.IGNORECASE | re.DOTALL
+)
+
+
+def _extract_textual_tool_calls(content: str) -> list[dict] | None:
+    """Salvage inline-text tool calls into OpenAI-shaped tool_calls, or None.
+
+    Tolerates either a JSON object or a JSON array inside the tags, and serialises
+    each call's arguments to the JSON string the rest of the loop expects.
+    """
+    if not content:
+        return None
+    calls: list[dict] = []
+    for block in _TOOLCALL_RE.findall(content):
+        try:
+            parsed = json.loads(block.strip())
+        except json.JSONDecodeError:
+            continue
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
+            if not isinstance(item, dict) or "name" not in item:
+                continue
+            args = item.get("arguments", {})
+            if not isinstance(args, str):
+                args = json.dumps(args)
+            calls.append(
+                {
+                    "id": f"call_{len(calls)}",
+                    "type": "function",
+                    "function": {"name": item["name"], "arguments": args},
+                }
+            )
+    return calls or None
 
 
 def _to_json(value: Any) -> str:
@@ -135,9 +185,17 @@ async def chat(req: ChatRequest) -> ChatResponse:
     for _ in range(MAX_ITERATIONS):
         resp = await client.chat(messages, tools=schemas)
         msg = resp["choices"][0]["message"]
-        messages.append(msg)
 
         tool_calls = msg.get("tool_calls")
+        if not tool_calls:
+            # Recover any tool call the model emitted as text rather than structure.
+            salvaged = _extract_textual_tool_calls(msg.get("content") or "")
+            if salvaged:
+                msg = {**msg, "content": None, "tool_calls": salvaged}
+                tool_calls = salvaged
+
+        messages.append(msg)
+
         if not tool_calls:
             return ChatResponse(reply=msg.get("content") or "", steps=steps)
 

@@ -8,6 +8,7 @@ Owned by one tool-builder agent. See .claude/agents/tool-builder.md.
 
 from __future__ import annotations
 
+import difflib
 import functools
 import warnings
 from pathlib import Path
@@ -148,15 +149,50 @@ def _filter_stops_by_bbox(
 # ---------------------------------------------------------------------------
 
 
-def _find_neighbourhood(name: str) -> Optional[pd.Series]:
-    """Return the neighbourhoods-158 row whose AREA_NAME best matches *name*."""
-    gdf = _load_neighbourhoods()
-    lower = name.strip().lower()
-    mask = gdf["AREA_NAME"].str.lower().str.contains(lower, regex=False)
-    matches = gdf[mask]
-    if matches.empty:
+# Minimum string-similarity for a fuzzy (typo-tolerant) name match. 0.6 accepts
+# "Clanton Rock" → "Clanton Park" while still rejecting unrelated input.
+_FUZZY_MIN_RATIO = 0.6
+
+
+@functools.lru_cache(maxsize=1)
+def _neighbourhood_names() -> list[str]:
+    """All 158 canonical AREA_NAMEs (cached)."""
+    return list(_load_neighbourhoods()["AREA_NAME"])
+
+
+@functools.lru_cache(maxsize=256)
+def _resolve_neighbourhood_name(name: str) -> Optional[str]:
+    """Resolve a (possibly misspelled) area name to a canonical AREA_NAME, or None.
+
+    Tiered, most-precise first: exact (case-insensitive) → substring (the historical
+    behaviour) → fuzzy closest match by edit similarity. The fuzzy tier is what lets
+    a typo like "Clanton Rock" land on "Clanton Park" and just proceed, instead of
+    erroring; unrelated input stays below the threshold and returns None.
+    """
+    q = name.strip().lower()
+    if not q:
         return None
-    return matches.iloc[0]
+    lowered = {n.lower(): n for n in _neighbourhood_names()}
+    # 1. exact (case-insensitive)
+    if q in lowered:
+        return lowered[q]
+    # 2. substring — first containing name (e.g. "annex" → "Annex")
+    for low, orig in lowered.items():
+        if q in low:
+            return orig
+    # 3. fuzzy — closest name above the similarity threshold
+    close = difflib.get_close_matches(q, list(lowered), n=1, cutoff=_FUZZY_MIN_RATIO)
+    return lowered[close[0]] if close else None
+
+
+def _find_neighbourhood(name: str) -> Optional[pd.Series]:
+    """Return the neighbourhoods-158 row whose AREA_NAME best matches *name*,
+    tolerating misspellings via _resolve_neighbourhood_name."""
+    canonical = _resolve_neighbourhood_name(name)
+    if canonical is None:
+        return None
+    gdf = _load_neighbourhoods()
+    return gdf[gdf["AREA_NAME"] == canonical].iloc[0]
 
 
 def _area_km2(geom) -> Optional[float]:
