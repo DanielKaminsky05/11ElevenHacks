@@ -9,6 +9,17 @@
 - [FastAPI Best Practices](docs/best-practices/fastapi.md) — conventions for the Python backend (runs on the Spark).
 - [Testing Best Practices](docs/best-practices/testing.md) — how to write and maintain tests.
 
+## Backend & tools
+
+- The backend lives in `backend/` (FastAPI, runs on the Spark). See [FastAPI Best Practices](docs/best-practices/fastapi.md).
+- Tools live one family per module under `backend/app/tools/` (`city_state`, `diagnostics`, `simulation`, `optimization`, `explanation`), registered with the `@tool` decorator and auto-imported by `app/tools/__init__.py`. Tests mirror this under `backend/tests/tools/test_<family>.py`. This split keeps parallel work collision-free — a contributor edits only their family module + its test file.
+- The `tool-builder` agent (`.claude/agents/tool-builder.md`) implements a family end-to-end with tests.
+
+## Testing
+
+- When a test run produces a lot of output, **pipe it to a file and search it** instead of scrolling the whole dump — e.g. `pytest 2>&1 | tee /tmp/t.log` then `grep -nE "FAIL|ERROR|assert" /tmp/t.log`. Much faster to find what broke.
+- Run the backend suite with the venv interpreter from `backend/`: `./.venv/Scripts/python.exe -m pytest -q`. To test a single family in isolation, target its file: `... -m pytest tests/tools/test_<family>.py`.
+
 ## Committing
 
 - When creating commits, credit only the user (Daniel). Do **not** add a `Co-Authored-By: Claude` line or any other self-attribution.

@@ -1,0 +1,45 @@
+[project]
+name = "transitrl-backend"
+version = "0.1.0"
+description = "TransitRL backend — FastAPI app serving the planning-copilot tools, agent loop, and training stream. Runs on the DGX Spark."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    # Data/compute stack that runs on the laptop (CPU). GPU acceleration
+    # (cudf/cuspatial) swaps in on the Spark behind the same APIs.
+    "pandas>=2.2",
+    "numpy>=2.0",
+    "geopandas>=1.0",
+    "shapely>=2.0",
+    "openpyxl>=3.1",
+]
+
+# Dev tooling — installs on any machine (laptop or Spark).
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",
+]
+# GPU / ML stack — installs ONLY on the Spark (needs NVIDIA package indexes).
+# Kept out of the default deps so the app installs and boots on a non-GPU laptop.
+#   pip install cudf-cu12 cuspatial-cu12 cuopt torch gymnasium stable-baselines3
+gpu = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
