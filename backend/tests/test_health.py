@@ -15,8 +15,4 @@ def test_health_ok():
     assert body["grid_loaded"] is False  # stubbed until the data layer lands
 
 
-def test_chat_stub():
-    with TestClient(app) as client:
-        resp = client.post("/chat", json={"message": "where are the transit gaps?"})
-    assert resp.status_code == 200
-    assert "stub" in resp.json()["reply"].lower()
+# POST /chat now runs the real agent loop — see tests/test_chat.py for its coverage.

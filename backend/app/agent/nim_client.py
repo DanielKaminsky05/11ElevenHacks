@@ -11,6 +11,8 @@ set (laptop dev/demo). Tests should monkeypatch `get_nim_client` to inject a moc
 
 from __future__ import annotations
 
+import json
+
 import httpx
 
 
@@ -58,6 +60,56 @@ class FakeNIMClient:
             "from the provided metrics without a live model."
         )
         return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+
+class ScriptedFakeNIMClient:
+    """Offline NIM whose turns are scripted ahead of time, so the agent loop can be
+    exercised end-to-end with no model.
+
+    `script` is a list of canned assistant turns, one returned per `chat` call:
+      - a `str`                                  → a final answer (assistant content)
+      - a list of `(tool_name, args_dict)` pairs → an assistant turn that requests
+                                                    those tool calls
+
+    Each returned dict matches the OpenAI/NIM response shape, so the loop treats it
+    exactly like a real completion. `chat` records every `messages` list it sees in
+    `self.calls`, so tests can assert what the loop fed back (tool results, order).
+    """
+
+    def __init__(self, script: list, model: str = "scripted-nim") -> None:
+        self.model = model
+        self._script = list(script)
+        self._i = 0
+        self.calls: list[list[dict]] = []
+
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> dict:
+        self.calls.append(messages)
+        if self._i >= len(self._script):
+            raise AssertionError(
+                "ScriptedFakeNIMClient ran out of scripted turns; the loop asked for "
+                f"more than the {len(self._script)} turn(s) provided."
+            )
+        turn = self._script[self._i]
+        self._i += 1
+        if isinstance(turn, str):
+            return {"choices": [{"message": {"role": "assistant", "content": turn}}]}
+        tool_calls = [
+            {
+                "id": f"call_{self._i}_{j}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(call_args)},
+            }
+            for j, (name, call_args) in enumerate(turn)
+        ]
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": None, "tool_calls": tool_calls}}
+            ]
+        }
 
 
 def get_nim_client() -> "NIMClient | FakeNIMClient":
