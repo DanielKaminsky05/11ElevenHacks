@@ -23,8 +23,8 @@ import {
 } from "@/lib/choropleth";
 import { subscribeMapCommand } from "@/lib/map-bus";
 import { planToMapAction } from "@/lib/planner-actions";
-import { MapLegend, type LayerKey, type LegendState } from "./map-legend";
-import { ViewSwitcher } from "./view-switcher";
+import type { LayerKey, LegendState } from "./map-legend";
+import { ControlPanel } from "./control-panel";
 import { RouteDetails, type SelectedRoute } from "./route-details";
 import { MapControls } from "./map-controls";
 import { NeighbourhoodDrawer } from "./neighbourhood-drawer";
@@ -454,20 +454,18 @@ export function MapView() {
       style={{ height: "100%", background: MAP_BACKGROUND }}
     >
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      <MapLegend
-        status={status}
-        visibility={visibility}
-        counts={counts}
-        onToggle={toggleLayer}
-      />
       {ready && (
-        <ViewSwitcher
+        <ControlPanel
+          status={status}
+          visibility={visibility}
+          counts={counts}
+          onToggle={toggleLayer}
           views={VIEWS}
-          activeId={activeViewId}
+          activeViewId={activeViewId}
           activeOption={activeOption}
-          onSelect={selectView}
+          onSelectView={selectView}
           onOption={changeOption}
-          legend={viewLegend}
+          viewLegend={viewLegend}
         />
       )}
       <RouteDetails
