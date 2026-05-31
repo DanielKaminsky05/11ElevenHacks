@@ -61,7 +61,7 @@ export function addChoroplethLayers(
       layout: { visibility },
       paint: {
         "fill-color": "#1d4e89",
-        "fill-opacity": opts.fillOpacity ?? 0.6,
+        "fill-opacity": opts.fillOpacity ?? 0.4,
       },
     });
   }

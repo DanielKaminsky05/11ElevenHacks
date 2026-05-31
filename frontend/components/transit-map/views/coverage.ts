@@ -78,7 +78,7 @@ export const coverageView: ViewModule = {
       fillId: FILL_ID,
       sourceId: COVERAGE_SOURCE,
       visible: false,
-      fillOpacity: 0.65,
+      fillOpacity: 0.4,
     });
     coverageView.layerIds.push(fillId, outlineId);
 

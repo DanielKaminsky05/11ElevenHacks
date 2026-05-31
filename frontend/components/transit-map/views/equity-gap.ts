@@ -90,7 +90,7 @@ export const equityGapView: ViewModule = {
       fillId: FILL_ID,
       sourceId: EQUITY_SOURCE,
       visible: false,
-      fillOpacity: 0.7,
+      fillOpacity: 0.45,
     });
     equityGapView.layerIds.push(fillId, outlineId);
 
