@@ -9,8 +9,8 @@ const MapView = dynamic(() => import("./map-view").then((m) => m.MapView), {
   ssr: false,
   loading: () => (
     <div
-      className="flex h-full w-full items-center justify-center text-sm text-[#9fb4d6]"
-      style={{ background: MAP_BACKGROUND }}
+      className="flex w-full items-center justify-center text-sm text-[#9fb4d6]"
+      style={{ height: "100%", background: MAP_BACKGROUND }}
     >
       Loading map…
     </div>

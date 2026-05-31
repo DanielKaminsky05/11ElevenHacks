@@ -64,6 +64,12 @@ export function MapView() {
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 
+    // The map can mount (via next/dynamic) before the container has its final
+    // size, leaving MapLibre stuck at its 300px fallback height. Keep the GL
+    // canvas in sync with the container.
+    const resizeObserver = new ResizeObserver(() => map.resize());
+    resizeObserver.observe(containerRef.current);
+
     let cancelled = false;
 
     async function addNetwork() {
@@ -81,6 +87,9 @@ export function MapView() {
       const { routes, stops } = toGeoJSON(data);
       map.addSource("routes", { type: "geojson", data: routes });
       map.addSource("stops", { type: "geojson", data: stops });
+
+      // Extruded buildings sit under the routes for the demo's dark 3D look.
+      add3DBuildings(map);
 
       // Route lines: a blurred glow halo under a crisp core, one pair per mode.
       for (const [mode, cfg] of Object.entries(MODE)) {
@@ -176,6 +185,7 @@ export function MapView() {
 
     return () => {
       cancelled = true;
+      resizeObserver.disconnect();
       map.remove();
       mapRef.current = null;
     };
@@ -198,8 +208,11 @@ export function MapView() {
   }
 
   return (
-    <div className="relative h-full w-full" style={{ background: MAP_BACKGROUND }}>
-      <div ref={containerRef} className="absolute inset-0" />
+    <div
+      className="relative w-full"
+      style={{ height: "100%", background: MAP_BACKGROUND }}
+    >
+      <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
       <MapLegend
         status={status}
         visibility={visibility}
@@ -208,6 +221,52 @@ export function MapView() {
       />
     </div>
   );
+}
+
+/**
+ * Adds an extruded-building layer if the basemap exposes OpenMapTiles
+ * buildings. Drawn before the route layers so routes render on top; only
+ * visible once zoomed in (minzoom 13), matching the demo's 3D scene.
+ */
+function add3DBuildings(map: maplibregl.Map) {
+  if (map.getLayer("ttc-3d-buildings")) return;
+
+  let source: string | null = null;
+  for (const [id, s] of Object.entries(map.getStyle().sources ?? {})) {
+    if (s.type === "vector" && id.toLowerCase().includes("openmaptiles")) {
+      source = id;
+    }
+  }
+  if (!source) source = "openmaptiles";
+
+  try {
+    map.addLayer({
+      id: "ttc-3d-buildings",
+      source,
+      "source-layer": "building",
+      type: "fill-extrusion",
+      minzoom: 13,
+      paint: {
+        "fill-extrusion-color": [
+          "interpolate",
+          ["linear"],
+          ["coalesce", ["get", "render_height"], 10],
+          0,
+          "#1b2a44",
+          50,
+          "#22416b",
+          150,
+          "#2e5a93",
+        ] as ExpressionSpecification,
+        "fill-extrusion-height": ["coalesce", ["get", "render_height"], 12],
+        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
+        "fill-extrusion-opacity": 0.78,
+      },
+    });
+  } catch (err) {
+    // Some basemaps lack a building layer; the map still works without it.
+    console.warn("3D buildings unavailable for this style:", err);
+  }
 }
 
 /** Attaches click popups for route lines and bus stops. */
