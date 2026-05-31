@@ -38,6 +38,14 @@ LINE2_WEST = Venue(name="Line 2: Jane–Ossington", lat=43.6556, lon=-79.4500)
 LINE1_MIDTOWN = Venue(name="Line 1: St Clair–Eglinton", lat=43.6920, lon=-79.3960)
 EGLINTON_CORRIDOR = Venue(name="Eglinton Ave (Crosstown corridor)", lat=43.7050, lon=-79.3900)
 
+# Road-closure locations (WGS84)
+GARDINER_EXPRESSWAY = Venue(name="Gardiner Expressway (DVP–Dufferin)", lat=43.6380, lon=-79.4000)
+KING_ST_W = Venue(name="King St W (Bathurst–Jarvis)", lat=43.6450, lon=-79.3950)
+YONGE_ST_DOWNTOWN = Venue(name="Yonge St (Dundas–College)", lat=43.6600, lon=-79.3830)
+BLOOR_VIADUCT = Venue(name="Bloor St (Prince Edward Viaduct)", lat=43.6760, lon=-79.3590)
+UNIVERSITY_AVE = Venue(name="University Ave (College–Front)", lat=43.6530, lon=-79.3880)
+LAKESHORE_BLVD = Venue(name="Lake Shore Blvd W (Exhibition)", lat=43.6330, lon=-79.4150)
+
 
 def _dt(y: int, m: int, d: int, h: int = 0, mn: int = 0) -> datetime:
     return datetime(y, m, d, h, mn, tzinfo=ET)
@@ -232,6 +240,117 @@ _EVENTS: list[Event] = [
             shuttle_replacement=False,
         ),
         description="Ongoing lane reductions and bus slowdowns along the Eglinton corridor.",
+        source="mock",
+    ),
+
+    # ===== Road closures (surface-route diversions) =====
+    Event(
+        id="road-gardiner-expressway-2026-06-06",
+        title="Gardiner Expressway weekend closure (DVP → Dufferin)",
+        category=EventCategory.closure,
+        kind=EventKind.supply_disruption,
+        venue=GARDINER_EXPRESSWAY,
+        start=_dt(2026, 6, 6, 0),
+        end=_dt(2026, 6, 7, 23, 59),
+        impact=TransitImpact(
+            magnitude=Magnitude.high,
+            affected_lines=["29 Dufferin", "509 Harbourfront", "510 Spadina"],
+            shuttle_replacement=False,
+        ),
+        description="Full weekend closure of the central Gardiner for rehabilitation. "
+        "Traffic spills onto Lake Shore and downtown surface streets, slowing "
+        "waterfront streetcars and Dufferin buses.",
+        source="mock",
+    ),
+    Event(
+        id="road-king-st-w-2026-06-15",
+        title="Road closure: King St W (Bathurst → Jarvis)",
+        category=EventCategory.closure,
+        kind=EventKind.supply_disruption,
+        venue=KING_ST_W,
+        start=_dt(2026, 6, 15, 6),
+        end=_dt(2026, 6, 19, 22),
+        impact=TransitImpact(
+            magnitude=Magnitude.high,
+            affected_lines=["504 King", "508 Lake Shore"],
+            shuttle_replacement=True,
+            radius_km=1.0,
+        ),
+        description="Watermain work shuts the King corridor through the core for a week. "
+        "The 504 King — the TTC's busiest streetcar — is diverted; shuttle buses "
+        "run Bathurst–Jarvis.",
+        source="mock",
+    ),
+    Event(
+        id="road-yonge-st-2026-06-21",
+        title="Road closure: Yonge St (Dundas → College)",
+        category=EventCategory.closure,
+        kind=EventKind.supply_disruption,
+        venue=YONGE_ST_DOWNTOWN,
+        start=_dt(2026, 6, 21, 8),
+        end=_dt(2026, 6, 21, 20),
+        impact=TransitImpact(
+            magnitude=Magnitude.medium,
+            affected_lines=["97 Yonge"],
+            shuttle_replacement=False,
+            radius_km=0.8,
+        ),
+        description="Open-streets pedestrian event closes Yonge through downtown for the day. "
+        "Surface buses divert to parallel streets; Line 1 subway unaffected.",
+        source="mock",
+    ),
+    Event(
+        id="road-bloor-viaduct-2026-07-11",
+        title="Road closure: Bloor St over the Don Valley (Viaduct)",
+        category=EventCategory.closure,
+        kind=EventKind.supply_disruption,
+        venue=BLOOR_VIADUCT,
+        start=_dt(2026, 7, 11, 0),
+        end=_dt(2026, 7, 12, 23, 59),
+        impact=TransitImpact(
+            magnitude=Magnitude.medium,
+            affected_lines=["300 Bloor-Danforth Night Bus"],
+            shuttle_replacement=False,
+            radius_km=1.0,
+        ),
+        description="Prince Edward Viaduct deck repairs close Bloor over the valley for a "
+        "weekend. Night buses reroute; Line 2 subway underneath runs normally.",
+        source="mock",
+    ),
+    Event(
+        id="road-university-ave-2026-08-09",
+        title="Road closure: University Ave (College → Front)",
+        category=EventCategory.closure,
+        kind=EventKind.supply_disruption,
+        venue=UNIVERSITY_AVE,
+        start=_dt(2026, 8, 9, 5),
+        end=_dt(2026, 8, 9, 18),
+        impact=TransitImpact(
+            magnitude=Magnitude.medium,
+            affected_lines=["5 Avenue Rd", "94 Wellesley"],
+            shuttle_replacement=False,
+            radius_km=1.2,
+        ),
+        description="Marathon route closes University Ave and several downtown streets for "
+        "the morning. Numerous bus diversions across the core.",
+        source="mock",
+    ),
+    Event(
+        id="road-lakeshore-caribana-2026-08-01",
+        title="Road closure: Lake Shore Blvd W (Caribbean Carnival)",
+        category=EventCategory.closure,
+        kind=EventKind.supply_disruption,
+        venue=LAKESHORE_BLVD,
+        start=_dt(2026, 8, 1, 6),
+        end=_dt(2026, 8, 1, 23, 59),
+        impact=TransitImpact(
+            magnitude=Magnitude.severe,
+            affected_lines=["29 Dufferin", "509 Harbourfront"],
+            shuttle_replacement=False,
+            radius_km=2.0,
+        ),
+        description="Lake Shore Blvd closes end-to-end for the Grand Parade. Pairs with the "
+        "Caribbean Carnival demand surge — severe disruption around Exhibition.",
         source="mock",
     ),
 ]

@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import chat, health, planner, tools
+from app.routers import chat, events, health, planner, tools
 from app.state import AppState, load_city_grid
 from app.ws import training
 
@@ -55,6 +55,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(planner.router)
+app.include_router(events.router)
 app.include_router(tools.router)
 app.include_router(training.router)
 
