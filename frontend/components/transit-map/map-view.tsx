@@ -745,7 +745,6 @@ function wireInteractions(
   });
 }
 
-<<<<<<< HEAD
 /** Hover cursor + click popup on event markers (closures and demand surges). */
 function wireEventInteractions(map: maplibregl.Map) {
   const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
@@ -770,7 +769,7 @@ function wireEventInteractions(map: maplibregl.Map) {
     });
   }
 }
-=======
+
 /** Empty FeatureCollection (used to clear the optimizer layer between re-solves). */
 const EMPTY_FC = { type: "FeatureCollection", features: [] } as const;
 
@@ -855,4 +854,3 @@ function animateOptimizerStops(map: maplibregl.Map, steps: OptStep[]): () => voi
     for (const t of timers) clearTimeout(t);
   };
 }
->>>>>>> origin/main

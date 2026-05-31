@@ -8,13 +8,9 @@ import {
   loadEvents,
   type CityEvent,
 } from "@/lib/events";
-<<<<<<< HEAD
-import { emitMapCommand } from "@/lib/map-bus";
-=======
 import type { RewardWeights } from "@/lib/planner";
 import { runOptimizer, type OptResult } from "@/lib/optimizer";
 import { emitMapCommand, subscribeMapCommand } from "@/lib/map-bus";
->>>>>>> origin/main
 import type { LayerKey, LegendState } from "./map-legend";
 import type { ViewModule, LegendSpec } from "./views/types";
 
