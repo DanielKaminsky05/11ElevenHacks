@@ -22,6 +22,7 @@ import {
   type NeighbourhoodProps,
 } from "@/lib/choropleth";
 import { subscribeMapCommand } from "@/lib/map-bus";
+import type { OptStep } from "@/lib/optimizer";
 import { planToMapAction } from "@/lib/planner-actions";
 import type { LayerKey, LegendState } from "./map-legend";
 import { ControlPanel } from "./control-panel";
@@ -78,6 +79,10 @@ export function MapView() {
   // Cached neighbourhood FeatureCollection — used for the click hit-layer and
   // for fitting the camera when the planner drives the map.
   const nbhdFcRef = useRef<NeighbourhoodFC | null>(null);
+
+  // Cancel handle for the in-flight optimizer build animation (so a re-solve
+  // cancels the previous replay).
+  const optAnimRef = useRef<(() => void) | null>(null);
 
   // Create the map and load the network once on mount.
   useEffect(() => {
@@ -439,6 +444,25 @@ export function MapView() {
     });
   }, [ready, selectView]);
 
+  // Animate the optimizer's recommended stops landing on the map. Each re-solve
+  // (e.g. dragging the equity weight up) replays from scratch, so stops visibly
+  // migrate toward the newly-weighted areas.
+  useEffect(() => {
+    if (!ready) return;
+    const unsubscribe = subscribeMapCommand((cmd) => {
+      if (cmd.type !== "optimizerResult") return;
+      const map = mapRef.current;
+      if (!map) return;
+      optAnimRef.current?.();
+      optAnimRef.current = animateOptimizerStops(map, cmd.steps);
+    });
+    return () => {
+      unsubscribe();
+      optAnimRef.current?.();
+      optAnimRef.current = null;
+    };
+  }, [ready]);
+
   function changeOption(optionId: string) {
     const map = mapRef.current;
     const view = activeViewId ? getView(activeViewId) : null;
@@ -620,4 +644,89 @@ function wireInteractions(
       .setHTML(`<b>${p.name}</b><br>Bus stop${served ? ` · ${served}` : ""}`)
       .addTo(map);
   });
+}
+
+/** Empty FeatureCollection (used to clear the optimizer layer between re-solves). */
+const EMPTY_FC = { type: "FeatureCollection", features: [] } as const;
+
+/**
+ * Create the optimizer's recommended-stop layers if they don't exist yet: a soft
+ * glow halo under a bright core, sitting on top of everything. The newest stop in
+ * a step renders larger so each placement "pops" as the network builds.
+ */
+function ensureOptimizerStopLayers(map: maplibregl.Map) {
+  if (!map.getSource("optimized-stops")) {
+    map.addSource("optimized-stops", {
+      type: "geojson",
+      data: EMPTY_FC as unknown as GeoJSON.FeatureCollection,
+    });
+  }
+  if (!map.getLayer("optimized-stops-glow")) {
+    map.addLayer({
+      id: "optimized-stops-glow",
+      type: "circle",
+      source: "optimized-stops",
+      paint: {
+        "circle-radius": 20,
+        "circle-color": "#34d399",
+        "circle-blur": 1,
+        "circle-opacity": 0.22,
+      },
+    });
+  }
+  if (!map.getLayer("optimized-stops-core")) {
+    map.addLayer({
+      id: "optimized-stops-core",
+      type: "circle",
+      source: "optimized-stops",
+      paint: {
+        "circle-radius": [
+          "case",
+          ["==", ["get", "isNew"], 1],
+          10,
+          6,
+        ] as ExpressionSpecification,
+        "circle-color": "#6ee7b7",
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 1.5,
+        "circle-opacity": 0.95,
+      },
+    });
+  }
+}
+
+/**
+ * Replay the optimizer's per-step trajectory: each frame sets the layer to that
+ * step's stops (the last one flagged `isNew` so it pops), so the network appears
+ * to build itself. Returns a cancel function; a new result cancels the prior run.
+ */
+function animateOptimizerStops(map: maplibregl.Map, steps: OptStep[]): () => void {
+  ensureOptimizerStopLayers(map);
+  let cancelled = false;
+  const timers: ReturnType<typeof setTimeout>[] = [];
+
+  steps.forEach((step, idx) => {
+    const t = setTimeout(() => {
+      if (cancelled) return;
+      const src = map.getSource("optimized-stops") as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      if (!src) return;
+      const last = step.stops.length - 1;
+      src.setData({
+        type: "FeatureCollection",
+        features: step.stops.map((s, i) => ({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [s.lon, s.lat] },
+          properties: { isNew: i === last ? 1 : 0 },
+        })),
+      } as GeoJSON.FeatureCollection);
+    }, idx * 280);
+    timers.push(t);
+  });
+
+  return () => {
+    cancelled = true;
+    for (const t of timers) clearTimeout(t);
+  };
 }
