@@ -64,10 +64,18 @@ For each grid cell `i`, attach from the data the grid already rasterizes:
 | `pop_i`     | `population`                       | how many people live there |
 | `need_i`    | `pct_low_income` (+ ON-Marg / NIA) | how underserved/vulnerable, in [0,1] |
 | `access0_i` | `stops` (existing network)         | how well-served **already** |
-| `dest_i`    | `destinations`                     | jobs/amenities they travel to |
+| `reach_i`   | `opportunity_access`               | jobs/opportunities they travel to (O-D demand) |
 
 The unit of value is **person-weighted access delivered to people who need it** —
 not "cells covered."
+
+> **O-D demand (implemented).** `reach_i` is the origin-destination demand side:
+> Hansen gravity access to job centres, in [0,1], exposed as the `opportunity_access`
+> grid channel and built in `app/tools/_demand.py`. It is **validated against StatCan
+> Spatial Access Measures** (transit employment-access index) — Spearman ≈ 0.82 across
+> Toronto's dissemination areas (`tests/tools/test_demand.py`). This is a *latent
+> access* model, not a ridership forecast. `# TODO(spark)`: replace the straight-line
+> node gravity with a GTFS transit travel-time surface (cuOpt).
 
 ### Credit only *new* access (the crux)
 
@@ -90,16 +98,21 @@ view directly.
 ### The four channels (normalized to [0,1])
 
 ```
-coverage   = Σ_i  pop_i · gained_i                 / Σ_i pop_i
-equity     = Σ_i  need_i · pop_i · gained_i         / Σ_i need_i · pop_i
+coverage   = Σ_i  pop_i · reach_i · gained_i        / Σ_i pop_i · reach_i   # O-D weighted
+equity     = Σ_i  need_i · pop_i · gained_i          / Σ_i need_i · pop_i    # need only
 travel     = 1 − normalize( Σ_i pop_i · dist_i(S) )       # person-weighted walk burden
 constraint = 1 − spacing_penalty(S) − protect_penalty(S)  # too-close pairs; "don't worsen" areas
 ```
 
-- **coverage** — share of *population* given new access.
-- **equity** — same, weighted by need: "what share of *high-need* people got new
-  access." The differentiator: coverage delivered to marginalized, currently-
-  underserved residents, quantified from real census/ON-Marg data.
+- **coverage** — population given new access, **weighted by opportunity reach** (the
+  O-D demand term): a stop is credited for the *jobs/opportunities* it connects
+  residents to, so one feeding a job-rich corridor beats an equal-population stop on
+  a dead-end.
+- **equity** — population given new access, weighted by need (low-income share) —
+  **but not by reach, by design.** Keeping equity reach-free means it still serves
+  high-need **transit deserts** (low-income areas cut off from jobs), preserving a
+  distinct equity-vs-coverage tradeoff instead of collapsing the two. The
+  differentiator: access delivered to marginalized residents, from real census/ON-Marg.
 - **travel** — person-weighted proximity (breadth-vs-depth tradeoff vs. coverage).
 - **constraint** — feasibility: spacing (no redundant clustering) + the `protect`
   field ("without hurting downtown commutes" → penalty if a protected area's access
@@ -171,12 +184,17 @@ Hold the grid + candidate buffers + Nemotron context in the 128 GB unified memor
 
 ## Concrete work items (file-scoped)
 
-1. **`app/tools/city_state.py` — `get_city_grid`:** expose per-cell `pop_i`,
+Items 1–2 below are **implemented** (incl. the O-D `reach_i` / `opportunity_access`
+layer in `app/tools/_demand.py`, SAM-validated). 3–5 track the optimizer/stream/tests.
+
+1. ✅ **`app/tools/city_state.py` — `get_city_grid`:** exposes per-cell `pop_i`,
    `need_i` (from `pct_low_income`; ON-Marg/NIA later), `access0_i` (from existing
-   `stops`). Pure pandas/geopandas now; `# TODO(spark)` GPU swap later.
-2. **`app/tools/optimization.py` — `_reward`:** rewrite to the grounded,
-   gained-access, person-weighted form above. **Delete the fake southern-half equity
-   proxy.** Keep the `RewardSpec` weight fields as-is.
+   `stops`), plus the `destinations` and `opportunity_access` (`reach_i`) channels.
+   Pure pandas/geopandas now; `# TODO(spark)` GPU swap later.
+2. ✅ **`app/tools/optimization.py` — `_reward`:** grounded, gained-access,
+   person-weighted form above, with **coverage opportunity-weighted by `reach_i`**
+   and **equity need-only** (the fake southern-half equity proxy is gone). The
+   `RewardSpec` weight fields are unchanged.
 3. **`app/tools/optimization.py` — `_greedy_place`:** add warm-start + local-search
    swap pass; emit per-step states.
 4. **`app/ws/training.py`:** replace the echo stub with a stream of per-step

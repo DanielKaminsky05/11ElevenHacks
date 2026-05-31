@@ -11,6 +11,7 @@ Coverage per tool-builder spec (§3 of .claude/agents/tool-builder.md):
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -169,15 +170,54 @@ class TestGetCityGrid:
         assert nonzero > 158
 
     def test_stub_channels_return_zero_grid(self):
-        """destinations/network/boundary are stubs and should return all-zero grids."""
+        """network/boundary remain stubs and should return all-zero grids."""
         args = GetCityGridArgs(
-            bbox=DOWNTOWN_BBOX, channels=["destinations", "network", "boundary"], resolution=5
+            bbox=DOWNTOWN_BBOX, channels=["network", "boundary"], resolution=5
         )
         result = get_city_grid(args)
-        for ch in ["destinations", "network", "boundary"]:
+        for ch in ["network", "boundary"]:
             grid = result["grid"][ch]
             total = sum(cell for row in grid for cell in row)
             assert total == 0, f"Stub channel {ch!r} should be all zeros"
+
+    def test_destinations_channel_carries_job_mass(self):
+        """destinations rasterises the Urban Growth Centre job weights — non-zero
+        over the city, with the Downtown cell the heaviest."""
+        args = GetCityGridArgs(channels=["destinations"], resolution=40)
+        result = get_city_grid(args)
+        grid = np.asarray(result["grid"]["destinations"])
+        assert grid.sum() > 0, "destinations channel should carry job mass"
+        # Downtown (weight 1.0) is the single largest attraction node.
+        assert grid.max() >= 1.0
+
+    def test_opportunity_access_channel_in_unit_interval(self):
+        args = GetCityGridArgs(channels=["opportunity_access"], resolution=20)
+        result = get_city_grid(args)
+        grid = np.asarray(result["grid"]["opportunity_access"])
+        assert grid.shape == (20, 20)
+        assert grid.min() >= 0.0 and grid.max() <= 1.0
+        assert grid.max() > 0.5, "downtown core should read as high opportunity access"
+
+    def test_opportunity_access_decays_from_downtown(self):
+        """Access is highest near Downtown and lower at the suburban edge."""
+        # Small bbox over the Financial District vs. the far north-west corner.
+        downtown = get_city_grid(
+            GetCityGridArgs(
+                bbox=BBox(west=-79.39, south=43.64, east=-79.37, north=43.66),
+                channels=["opportunity_access"],
+                resolution=5,
+            )
+        )
+        edge = get_city_grid(
+            GetCityGridArgs(
+                bbox=BBox(west=-79.63, south=43.82, east=-79.61, north=43.84),
+                channels=["opportunity_access"],
+                resolution=5,
+            )
+        )
+        dt_mean = np.mean(downtown["grid"]["opportunity_access"])
+        edge_mean = np.mean(edge["grid"]["opportunity_access"])
+        assert dt_mean > edge_mean
 
     def test_whole_city_no_bbox(self):
         """Omitting bbox should use the Toronto default and return a valid grid."""

@@ -21,6 +21,11 @@ from pydantic import BaseModel, Field, model_validator
 from shapely.geometry import Point, box
 
 from app.schemas.common import BBox
+from app.tools._demand import (
+    attraction_nodes as _attraction_nodes,
+    gravity_job_access as _gravity_job_access,
+    opportunity_access_normalised as _opportunity_access_normalised,
+)
 from app.tools.registry import tool
 
 # ---------------------------------------------------------------------------
@@ -428,6 +433,22 @@ def reachability(args: ReachabilityArgs) -> dict:
         )
     ]
 
+    # Opportunity reach (the O-D demand side): how job-rich this origin's location
+    # is, and the nearest job centre. Reachability is ultimately about reaching
+    # *opportunities*, not just stops — this is the destination half of that.
+    opportunity_access = float(
+        _opportunity_access_normalised(args.origin_lon, args.origin_lat)[0]
+    )
+    nearest_centre = None
+    best_dist = float("inf")
+    for node in _attraction_nodes():
+        dx = (float(node["lon"]) - args.origin_lon) * _METRES_PER_DEG_LON
+        dy = (float(node["lat"]) - args.origin_lat) * _METRES_PER_DEG_LAT
+        d = math.hypot(dx, dy)
+        if d < best_dist:
+            best_dist = d
+            nearest_centre = {"name": str(node["name"]), "distance_m": round(d, 1)}
+
     return {
         "reachable_stop_count": int(reachable_mask.sum()),
         "walk_radius_m": round(walk_radius_m, 1),
@@ -436,10 +457,15 @@ def reachability(args: ReachabilityArgs) -> dict:
         "nearest_stop_name": nearest_stop_name,
         "nearest_stop_dist_m": round(nearest_stop_dist_m, 1) if nearest_stop_dist_m is not None else None,
         "reachable_stops_sample": reachable_list[:20],
+        "opportunity_access": round(opportunity_access, 3),
+        "nearest_job_centre": nearest_centre,
         "method": "straight_line_walk_approximation",
         "note": (
             "CPU straight-line approximation; does not include transit transfer legs. "
-            "TODO(spark): upgrade to cuOpt GPU graph traversal with GTFS schedule."
+            "opportunity_access is gravity access to job centres at the origin (the O-D "
+            "demand side, SAM-validated). "
+            "TODO(spark): upgrade to cuOpt GPU graph traversal with GTFS schedule to "
+            "count opportunities reachable via transit within the time budget."
         ),
     }
 
@@ -513,11 +539,23 @@ def estimate_demand(args: EstimateDemandArgs) -> dict:
     merged["marg"] = pd.to_numeric(merged["Material_Resources_NHsTO2021"], errors="coerce").fillna(0)
     merged["racialized"] = pd.to_numeric(merged["Racialized_NC_Pop_NHsTO2021"], errors="coerce").fillna(0)
 
-    # Demand score: population × (1 + deprivation) × (1.5 if no stop nearby)
+    # Opportunity-access (O-D demand side): gravity access to job centres at each
+    # neighbourhood centroid, in [0, 1]. Trips are generated toward opportunities,
+    # so latent transit demand is higher where underserved residents also have
+    # opportunities worth travelling to. Validated against StatCan SAM (see _demand).
+    centroids = merged.geometry.centroid
+    merged["opportunity_access"] = _opportunity_access_normalised(
+        centroids.x.to_numpy(), centroids.y.to_numpy()
+    )
+
+    # Demand score: population × (1 + deprivation) × (1.5 if no stop nearby) ×
+    # an O-D opportunity modulation in [0.5, 1.0] (never zeroes — every area has
+    # some local demand, but job-reachable areas generate more trips).
     merged["demand_score"] = (
         merged["pop"]
         * (1 + merged["marg"].clip(lower=0))
         * merged["has_stop_nearby"].apply(lambda x: 1.0 if x else 1.5)
+        * (0.5 + 0.5 * merged["opportunity_access"])
     )
 
     # Horizon growth factor
@@ -536,6 +574,7 @@ def estimate_demand(args: EstimateDemandArgs) -> dict:
             "demand_score": round(float(row["demand_score"]), 0),
             "has_stop_within_400m": bool(row["has_stop_nearby"]),
             "marg_score": round(float(row["marg"]), 3),
+            "opportunity_access": round(float(row["opportunity_access"]), 3),
         })
 
     return {
@@ -545,9 +584,12 @@ def estimate_demand(args: EstimateDemandArgs) -> dict:
         "growth_factor_applied": gf,
         "note": (
             "Latent demand only — not a ridership forecast. "
-            "demand_score = population × (1 + deprivation_score) × access_penalty. "
+            "demand_score = population × (1 + deprivation_score) × access_penalty × "
+            "opportunity_modulation, where opportunity_access is gravity access to job "
+            "centres (the O-D demand side, SAM-validated). "
             "Future horizons use a uniform growth factor; development pipeline data "
-            "not yet integrated. TODO(spark): add Journey-to-Work O→D, intensification layers."
+            "not yet integrated. TODO(spark): replace node-gravity with Journey-to-Work "
+            "O→D + a GTFS transit travel-time surface; add intensification layers."
         ),
     }
 

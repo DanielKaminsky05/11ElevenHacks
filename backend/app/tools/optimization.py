@@ -36,6 +36,7 @@ from shapely.geometry import Point
 from shapely.ops import unary_union
 
 from app.agent.nim_client import get_nim_client
+from app.tools._demand import opportunity_access_normalised
 from app.tools.city_state import (
     GetCityGridArgs,
     _load_neighbourhoods,
@@ -235,6 +236,9 @@ class _GridFeatures:
     need: np.ndarray        # (D,) low-income share, in [0, 1]
     access0: np.ndarray     # (D,) gravity access from the EXISTING network, [0,1]
     nearest0: np.ndarray    # (D,) metres to nearest existing stop
+    reach: np.ndarray       # (D,) opportunity (job) access weight, [0,1] — the O-D
+                            #      "demand" side: how many jobs/opportunities are
+                            #      reachable from this cell's location. SAM-validated.
     pop_sum: float
     needpop_sum: float
     burden0: float          # do-nothing person-weighted walk burden (metre·people)
@@ -299,16 +303,28 @@ def _load_grid_features(resolution: int = _DEMAND_RESOLUTION) -> _GridFeatures:
     demand_lon = demand_lon[keep]
     demand_lat = demand_lat[keep]
 
+    # Opportunity-access weight (the O-D demand side): how many jobs/opportunities
+    # are reachable from each cell's location, in [0, 1]. Folds origin→destination
+    # demand into the reward so a new stop is credited for the *opportunities* it
+    # connects residents to — not merely for being walkable. Validated against
+    # StatCan SAM's transit employment-access index (see app/tools/_demand.py).
+    reach = opportunity_access_normalised(demand_lon, demand_lat)
+
     pop_sum = float(pop.sum())
     needpop = need * pop
     needpop_sum = float(needpop.sum())
     burden0 = float((pop * nearest0).sum())
 
     # Per-cell instant gains (value if a stop landed exactly on that cell):
-    #   coverage gain = pop · (unserved fraction); equity = need · that;
-    #   travel = pop · (metres removed ≈ its whole nearest-stop distance).
+    #   coverage = pop · (unserved fraction) · reach   (opportunity-weighted access)
+    #   equity   = need · pop · (unserved fraction)    (need-weighted; NOT reach)
+    #   travel   = pop · (metres removed ≈ its whole nearest-stop distance)
+    # Coverage carries `reach` so its ideal normaliser is on the same opportunity-
+    # weighted scale as the layout value below. Equity and travel stay orthogonal
+    # to opportunity (equity serves need incl. transit deserts; travel is pure walk
+    # burden).
     unserved = 1.0 - access0
-    cov_cumsum = np.cumsum(np.sort(pop * unserved)[::-1])
+    cov_cumsum = np.cumsum(np.sort(pop * unserved * reach)[::-1])
     eq_cumsum = np.cumsum(np.sort(need * pop * unserved)[::-1])
     travel_cumsum = np.cumsum(np.sort(pop * nearest0)[::-1])
 
@@ -319,6 +335,7 @@ def _load_grid_features(resolution: int = _DEMAND_RESOLUTION) -> _GridFeatures:
         need=need,
         access0=access0,
         nearest0=nearest0,
+        reach=reach,
         pop_sum=pop_sum,
         needpop_sum=needpop_sum,
         burden0=burden0,
@@ -380,8 +397,8 @@ def _score_layout(
     """Return (R, channel_scores) for a layout. Pure; no I/O.
 
     Channels (each a "% of the budget-achievable best", in [0, 1]):
-      coverage   — share of *population* given NEW access
-      equity     — same, weighted by need (low-income share)
+      coverage   — population given NEW access, weighted by opportunity reach (O-D)
+      equity     — population given NEW access, weighted by need (low-income share)
       travel     — reduction in person-weighted walk burden
       constraint — feasibility: 1 − spacing penalty (new stops only)
     """
@@ -410,8 +427,19 @@ def _score_layout(
     access_new = np.exp(-dist / _D0_M).max(axis=1)
     gained = np.maximum(0.0, access_new - feats.access0)
 
+    # Opportunity-weighted access (the O-D term) drives COVERAGE: a new on-ramp is
+    # worth what it connects people to. `gained · reach` credits a stop for the
+    # jobs/opportunities it unlocks, so a stop feeding a job-rich corridor beats an
+    # equal-population stop on a dead-end. reach is a fixed per-cell weight in
+    # [0,1] → saturation and monotonicity (greedy's submodular guarantee) hold.
+    #
+    # EQUITY stays pure need·pop·gained — "serve the underserved, including transit
+    # deserts" — so it remains distinct from coverage and keeps favouring high-need
+    # areas even where current job-access is low (the equity-vs-coverage tradeoff).
+    opp_gained = gained * feats.reach
+
     budget = spec.budget
-    cov_val = float((feats.pop * gained).sum())
+    cov_val = float((feats.pop * opp_gained).sum())
     eq_val = float((feats.need * feats.pop * gained).sum())
 
     nearest_any = np.minimum(feats.nearest0, dist.min(axis=1))

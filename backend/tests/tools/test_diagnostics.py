@@ -315,6 +315,24 @@ class TestReachability:
         )
         assert result["reachable_stop_count"] >= len(result["reachable_stops_sample"])
 
+    def test_opportunity_access_present_and_in_unit_interval(self):
+        """O-D demand side: reachability reports the origin's opportunity access."""
+        result = reachability(
+            ReachabilityArgs(origin_lon=UNION_LON, origin_lat=UNION_LAT, time_budget_min=30)
+        )
+        assert 0.0 <= result["opportunity_access"] <= 1.0
+        nc = result["nearest_job_centre"]
+        assert nc is not None and "name" in nc and "distance_m" in nc
+
+    def test_downtown_has_more_opportunity_access_than_periphery(self):
+        downtown = reachability(
+            ReachabilityArgs(origin_lon=UNION_LON, origin_lat=UNION_LAT, time_budget_min=30)
+        )
+        periphery = reachability(
+            ReachabilityArgs(origin_lon=-79.62, origin_lat=43.83, time_budget_min=30)
+        )
+        assert downtown["opportunity_access"] > periphery["opportunity_access"]
+
     # Input validation
 
     def test_time_budget_zero_raises(self):
@@ -351,6 +369,13 @@ class TestEstimateDemand:
             assert "neighbourhood" in item
             assert "demand_score" in item
             assert "population" in item
+
+    def test_demand_surface_exposes_opportunity_access(self):
+        """O-D demand side: each entry carries gravity job-access in [0, 1]."""
+        result = estimate_demand(EstimateDemandArgs())
+        for item in result["demand_surface"]:
+            assert "opportunity_access" in item
+            assert 0.0 <= item["opportunity_access"] <= 1.0
 
     def test_demand_scores_positive(self):
         """Demand scores should be non-negative."""

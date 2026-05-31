@@ -11,6 +11,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 import app.tools.optimization as optimization
@@ -23,10 +24,13 @@ from app.tools.optimization import (
     _JOBS,
     _GRID_COLS,
     _GRID_ROWS,
+    _GridFeatures,
+    _cell_to_lonlat,
     _greedy_search,
     _load_grid_features,
     _logical_candidate_cells,
     _reward,
+    _score_layout,
     _greedy_place,
     optimize_layout,
     optimization_status,
@@ -529,6 +533,71 @@ class TestGroundedReward:
         result = optimize_layout(OptimizeLayoutArgs(reward_spec=spec.model_dump(), seed=1))
         for k, v in result["channel_scores"].items():
             assert 0.0 <= v <= 1.0, f"channel {k}={v} out of [0,1]"
+
+
+class TestOpportunityWeightedCoverage:
+    """The O-D upgrade: coverage credits the *opportunities* a stop connects people
+    to, so a stop feeding a job-rich location beats an equal-population stop on a
+    dead-end. Built on a controlled synthetic grid where the ONLY difference between
+    the two candidate cells is their opportunity reach.
+    """
+
+    def _two_cell_feats(self, reach_a: float, reach_b: float) -> _GridFeatures:
+        # Two demand cells at opposite grid corners (far enough apart that a stop on
+        # one gives no walk access to the other). Identical population, need, and
+        # complete lack of existing service — only `reach` differs.
+        cell_a = (0, 0)
+        cell_b = (_GRID_ROWS - 1, _GRID_COLS - 1)
+        lon_a, lat_a = _cell_to_lonlat(*cell_a)
+        lon_b, lat_b = _cell_to_lonlat(*cell_b)
+        pop = np.array([100.0, 100.0])
+        need = np.array([0.5, 0.5])
+        access0 = np.array([0.0, 0.0])
+        nearest0 = np.array([10_000.0, 10_000.0])
+        reach = np.array([reach_a, reach_b])
+        unserved = 1.0 - access0
+        return _GridFeatures(
+            demand_lon=np.array([lon_a, lon_b]),
+            demand_lat=np.array([lat_a, lat_b]),
+            pop=pop,
+            need=need,
+            access0=access0,
+            nearest0=nearest0,
+            reach=reach,
+            pop_sum=float(pop.sum()),
+            needpop_sum=float((need * pop).sum()),
+            burden0=float((pop * nearest0).sum()),
+            cov_cumsum=np.cumsum(np.sort(pop * unserved * reach)[::-1]),
+            eq_cumsum=np.cumsum(np.sort(need * pop * unserved)[::-1]),
+            travel_cumsum=np.cumsum(np.sort(pop * nearest0)[::-1]),
+            candidates=(cell_a, cell_b),
+        )
+
+    def test_job_rich_stop_beats_dead_end_stop_on_coverage(self):
+        feats = self._two_cell_feats(reach_a=0.9, reach_b=0.1)
+        spec = RewardSpec(
+            coverage_weight=1.0, travel_weight=0.0, equity_weight=0.0,
+            constraint_weight=0.0, region="Toronto", budget=1,
+        )
+        _, scores_a = _score_layout([(0, 0)], spec, feats)  # high-reach cell
+        _, scores_b = _score_layout(
+            [(_GRID_ROWS - 1, _GRID_COLS - 1)], spec, feats  # dead-end cell
+        )
+        assert scores_a["coverage"] > scores_b["coverage"]
+
+    def test_equity_channel_ignores_reach(self):
+        """Equity must NOT depend on opportunity reach — two cells with equal need
+        and population yield equal equity value regardless of their job-access."""
+        feats = self._two_cell_feats(reach_a=0.9, reach_b=0.1)
+        spec = RewardSpec(
+            coverage_weight=0.0, travel_weight=0.0, equity_weight=1.0,
+            constraint_weight=0.0, region="Toronto", budget=1,
+        )
+        _, scores_a = _score_layout([(0, 0)], spec, feats)
+        _, scores_b = _score_layout(
+            [(_GRID_ROWS - 1, _GRID_COLS - 1)], spec, feats
+        )
+        assert abs(scores_a["equity"] - scores_b["equity"]) < 1e-9
 
 
 class TestEquityShift:

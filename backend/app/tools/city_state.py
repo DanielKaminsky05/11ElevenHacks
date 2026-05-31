@@ -21,6 +21,10 @@ from shapely.geometry import box
 
 from app.data import data_dir
 from app.schemas.common import BBox
+from app.tools._demand import (
+    attraction_nodes as _attraction_nodes,
+    opportunity_access_normalised as _opportunity_access_normalised,
+)
 from app.tools.registry import tool
 
 
@@ -259,7 +263,16 @@ class GetCityGridArgs(BaseModel):
         description="Area to rasterize. None = whole Toronto extent.",
     )
     channels: list[
-        Literal["population", "stops", "income", "need", "destinations", "network", "boundary"]
+        Literal[
+            "population",
+            "stops",
+            "income",
+            "need",
+            "destinations",
+            "opportunity_access",
+            "network",
+            "boundary",
+        ]
     ] = Field(
         default=["population", "stops"],
         description="Grid channels to include in the output tensor.",
@@ -390,11 +403,35 @@ def get_city_grid(args: GetCityGridArgs) -> dict:
             # TODO(spark): blend ON-Marg material-deprivation + NIA flags into the
             # need signal (loaders exist in diagnostics.py); GPU raster via cuSpatial.
 
-        elif channel in ("destinations", "network", "boundary"):
+        elif channel == "destinations":
+            # Job mass binned to cells: where the opportunities people travel TO
+            # actually are. Each Urban Growth Centre drops its relative employment
+            # weight into the cell it falls in (a point-mass layer, like `stops`).
+            for node in _attraction_nodes():
+                nlon, nlat = float(node["lon"]), float(node["lat"])
+                if not (bbox.west <= nlon <= bbox.east and bbox.south <= nlat <= bbox.north):
+                    continue
+                lo_idx = int(np.clip(np.searchsorted(lons[1:], nlon), 0, N - 1))
+                la_idx = int(np.clip(np.searchsorted(lats[1:], nlat), 0, N - 1))
+                grid[la_idx, lo_idx] += float(node["weight"])
+            # TODO(spark): swap the 5 growth-centre anchors for a geocoded jobs raster
+            # (Census place-of-work) via cuSpatial rasterization.
+
+        elif channel == "opportunity_access":
+            # Hansen gravity access to jobs/opportunities, in [0, 1] — the demand
+            # side of the network. Validated against StatCan SAM's transit
+            # employment-access index (Spearman ≈ 0.82); see app/tools/_demand.py.
+            lon_mesh, lat_mesh = np.meshgrid(lon_centres, lat_centres)  # [lat, lon]
+            grid = _opportunity_access_normalised(
+                lon_mesh.ravel(), lat_mesh.ravel()
+            ).reshape(N, N)
+            # TODO(spark): replace straight-line node gravity with a real GTFS
+            # transit travel-time surface (cuOpt graph traversal).
+
+        elif channel in ("network", "boundary"):
             # Stub channels — placeholder zeros.
-            # TODO(spark): populate from Employment Survey (destinations),
-            # Centreline + Pedestrian Network (network), and Neighbourhoods-158 /
-            # Wards (boundary) via cuSpatial rasterization.
+            # TODO(spark): populate from Centreline + Pedestrian Network (network)
+            # and Neighbourhoods-158 / Wards (boundary) via cuSpatial rasterization.
             pass  # grid already zeros
 
         channels_out[channel] = grid.tolist()

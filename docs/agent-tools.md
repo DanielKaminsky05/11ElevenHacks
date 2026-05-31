@@ -103,7 +103,8 @@ Isochrone + opportunity count: how many jobs, schools, and clinics are reachable
 **`transitrl.estimate_demand(bbox?, horizon=now|2031|2051)`**
 A latent-demand surface combining who lives where, where they need to go, and where growth is coming.
 - **Data:** population, Employment Survey, Journey-to-Work O→D flows, TTC ridership, **Development Pipeline**, Intensification-to-2051, TOC / Major Transit Station Areas, registered condos; transit-dependent populations (housing, shelters, seniors survey).
-- **Channels:** population, destinations, demand-signal.
+- **Channels:** population, destinations, **opportunity_access** (O-D), demand-signal.
+- **O-D demand (implemented):** each entry carries `opportunity_access` — gravity access to job centres, **validated against StatCan SAM** (transit employment-access, Spearman ≈ 0.82). Built in `app/tools/_demand.py`; also weights the optimizer's coverage term and feeds `reachability`. Latent access, not a ridership forecast.
 - **Q:** *"Where is unmet demand growing fastest over the next decade?"*
 
 **`transitrl.reliability_report(route | area)`**
