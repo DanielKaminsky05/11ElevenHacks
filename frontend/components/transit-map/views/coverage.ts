@@ -19,6 +19,9 @@ import {
 import type { ViewModule, LegendSpec } from "./types";
 
 const FILL_ID = "coverage-fill";
+// Own source: coverage joins cov/gap onto the features, so it must not share the
+// dedupe-guarded base source (whichever view loads first would win otherwise).
+const COVERAGE_SOURCE = "coverage-src";
 // Note: outline id is derived by addChoroplethLayers as `${FILL_ID}-outline`.
 const GAP_GRID_SOURCE = "coverage-gap-grid";
 const GAP_GRID_LAYER = "coverage-gap-dots";
@@ -67,12 +70,13 @@ export const coverageView: ViewModule = {
       }
     }
 
-    // Add (or reuse) the shared neighbourhoods source with enriched data.
-    ensureNeighbourhoodsSource(map, fc);
+    // Own source carrying the joined cov/gap properties.
+    ensureNeighbourhoodsSource(map, fc, COVERAGE_SOURCE);
 
     // Add choropleth fill + outline layers (hidden).
     const [fillId, outlineId] = addChoroplethLayers(map, {
       fillId: FILL_ID,
+      sourceId: COVERAGE_SOURCE,
       visible: false,
       fillOpacity: 0.65,
     });

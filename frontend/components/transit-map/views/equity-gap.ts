@@ -18,6 +18,9 @@ import {
 import type { ViewModule, LegendSpec } from "./types";
 
 const FILL_ID = "equity-gap-fill";
+// Own source: this view computes eq_score onto each feature, so it must not
+// share the dedupe-guarded base source (the computed props would be dropped).
+const EQUITY_SOURCE = "equity-gap-src";
 const SCORE_PROP = "eq_score";
 
 /** Build the interpretation string shown in the popup. */
@@ -79,12 +82,13 @@ export const equityGapView: ViewModule = {
       p["eq_marg"] = marg_material ?? null;
     }
 
-    // Register the shared source (deduped by helper).
-    ensureNeighbourhoodsSource(map, fc);
+    // Own source carrying the computed eq_score / eq_cov / eq_marg properties.
+    ensureNeighbourhoodsSource(map, fc, EQUITY_SOURCE);
 
     // Add fill + outline layers, both hidden. Capture ids.
     const [fillId, outlineId] = addChoroplethLayers(map, {
       fillId: FILL_ID,
+      sourceId: EQUITY_SOURCE,
       visible: false,
       fillOpacity: 0.7,
     });

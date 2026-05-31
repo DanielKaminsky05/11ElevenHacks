@@ -14,12 +14,18 @@ import {
 export const NEIGHBOURHOODS_SOURCE = "neighbourhoods";
 
 /** Ensure the shared neighbourhoods GeoJSON source exists exactly once. */
+// Views that only READ base properties (density, noc*, marg*) can share the one
+// default source. Views that ENRICH or COMPUTE per-feature properties (e.g. join
+// coverage, derive a composite score) MUST pass their own `sourceId` — otherwise
+// the shared-source dedupe keeps whichever view loaded first and silently drops
+// the later view's computed fields.
 export function ensureNeighbourhoodsSource(
   map: maplibregl.Map,
   data: NeighbourhoodFC,
+  sourceId: string = NEIGHBOURHOODS_SOURCE,
 ): void {
-  if (!map.getSource(NEIGHBOURHOODS_SOURCE)) {
-    map.addSource(NEIGHBOURHOODS_SOURCE, { type: "geojson", data });
+  if (!map.getSource(sourceId)) {
+    map.addSource(sourceId, { type: "geojson", data });
   }
 }
 
