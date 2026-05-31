@@ -578,6 +578,8 @@ async def parse_goal(args: ParseGoalArgs) -> dict:
     client = get_nim_client()
 
     system_prompt = (
+        # /no_think: Nemotron otherwise prepends its reasoning trace, breaking json.loads.
+        "/no_think\n"
         "You are a transit-planning assistant. "
         "Given a plain-English goal from a city planner, extract a structured reward specification "
         "as a JSON object with these fields:\n"
@@ -728,6 +730,8 @@ async def propose_candidates(args: ProposeCandidatesArgs) -> dict:
     client = get_nim_client()
 
     system_prompt = (
+        # /no_think so the model returns a clean JSON array, not a reasoning trace.
+        "/no_think\n"
         "You are a transit-planning assistant. "
         "Given a planning goal, suggest candidate areas of the city to focus stop-placement on. "
         f"The city grid is {_GRID_ROWS} rows × {_GRID_COLS} cols. "

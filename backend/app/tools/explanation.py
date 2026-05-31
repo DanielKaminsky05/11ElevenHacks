@@ -334,6 +334,8 @@ def _build_explain_prompt(scenario: Scenario, who_affected: dict) -> str:
     max_loss = min(deltas) if deltas else 0.0
 
     prompt = (
+        # /no_think keeps the narration clean (no leaked reasoning preamble).
+        "/no_think\n"
         f"You are a transportation planning analyst. Explain the following transit "
         f"scenario in plain language for a city councillor.\n\n"
         f"Scenario: {scenario.description or scenario.scenario_id}\n\n"
@@ -433,6 +435,8 @@ def _build_brief_prompt(
         for g in groups
     )
     prompt = (
+        # /no_think keeps the memo paragraph clean (no leaked reasoning preamble).
+        "/no_think\n"
         f"Write a concise equity-impact paragraph (3–4 sentences) for a planner memo.\n\n"
         f"Planning question: {question}\n"
         f"Recommendation: {recommendation}\n"
