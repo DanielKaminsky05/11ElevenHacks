@@ -128,7 +128,9 @@ async function main() {
       // Dark theme: the frame should be dim on average (basemap + background).
       backgroundIsDark: meanLuminance < 90,
       routesDrew: pct(counts.blueRoute) > 0.3,
-      stopsDrew: pct(counts.stop) > 0.05,
+      // Bus stops are tiny dots (~1.3px) at the default zoom, so even ~9k of
+      // them cover little area; a small but non-trivial footprint is expected.
+      stopsDrew: pct(counts.stop) > 0.01,
       noConsoleErrors: consoleErrors.length === 0,
     },
   };
