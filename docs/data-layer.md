@@ -2,6 +2,8 @@
 
 This is the source-of-truth catalog of datasets for TransitRL's **map data layer** — the geospatial substrate the RL agent queries and that gets rasterized into the multi-channel grid (population · stops · income/equity · destinations · network · boundary · demand-signal).
 
+> **What these datasets *do*:** see [Agent Tools & MCP Layer](agent-tools.md) for how each dataset here maps to a concrete tool the AI agent can call (the dataset→tool traceability matrix is in §4), and the unified vision of how those tools compose.
+
 Datasets are grouped by relevance:
 
 - **CORE** — directly builds an observation channel.
@@ -140,10 +142,26 @@ Files already downloaded under [`data/`](../data/) (see [`data/README.md`](../da
 | `data/geospatial/traffic-beacons.geojson` | Traffic Beacons | safety context | TANGENTIAL ✅ |
 | `data/surveys/seniors-survey-2017.xlsx` | Seniors Survey 2017 | equity/demand | TANGENTIAL ✅ |
 
-### Notable gaps (CORE not yet downloaded)
+### Inventory status (updated)
 
-- **Pedestrian Network** — we only have pedestrian *crossovers*, not the full walk graph the accessibility model wants.
-- **Intersection File** / **Address Points** — routing topology & grid alignment.
-- **Neighbourhoods (158) polygons** — confirm whether `areas.geojson` already is this; if not, fetch it.
-- **Equity designations** — Neighbourhood Improvement Areas, Priority Investment Neighbourhoods, Wellbeing Civics & Equity.
-- **Federal/Provincial** — none downloaded yet: Census Profile (DA/CT), Census boundary files, SAM, ON-Marg, Metrolinx GTFS.
+Most of the original CORE gaps are now closed — the following are **already in `data/`**:
+
+- ✅ **Metrolinx / GO Transit GTFS** — `data/transit/go-transit-gtfs/`
+- ✅ **Pedestrian Network** (full walk graph) — `data/geospatial/pedestrian-network.geojson`
+- ✅ **Intersection File** / **Address Points** — `data/geospatial/intersection-file.geojson`, `address-points.geojson`
+- ✅ **Neighbourhoods (158) polygons** — `data/geospatial/neighbourhoods-158.geojson`
+- ✅ **Equity designations** — `neighbourhood-improvement-areas.geojson`, `priority-investment-neighbourhoods/`, `wellbeing-civics-equity-indicators.xlsx`
+- ✅ **ON-Marg 2021** (DA + n158) — `data/census-demographics/on-marg-2021-*.xlsx`
+- ✅ **StatCan 2021 DA boundaries** — `data/census-demographics/statcan-2021-da-boundaries/`
+- ✅ **Census Profile 2021** — Census Tract (`census-profile-2021-census-tracts/`) and CMA (`census-profile-2021-cma/`) tables; join to boundaries by DGUID.
+- ✅ **Spatial Access Measures (SAM) 2024** — `data/census-demographics/spatial-access-measures-2024/` (incl. `acs_public_transit_peak/offpeak.csv`, `acs_walking.csv`) — accessibility benchmark / reward-validation layer.
+- ✅ **Ontario Road Network (ORN)** — `data/geospatial/ontario-road-network/` (file geodatabase) — provincial road network / cost surface.
+
+**Still to fetch:**
+
+- **Census Profile 2021 (per-DA)** — we have CT + CMA tables and DA *boundaries*; the per-DA profile attributes (GEONO=006, large national file) are optional if CT resolution suffices.
+- **Demand & feasibility (Phase 3):** Development Pipeline, Neighbourhood Intensification to 2051, Journey-to-Work flows, Zoning By-law.
+
+> **Note on size:** the heaviest local files are gitignored (`data/*` except `README.md`). Census CT CSV ≈ 2.5 GB, ORN ≈ 1.1 GB, address points ≈ 562 MB, SAM ≈ 276 MB, GO GTFS ≈ 178 MB, StatCan DA boundaries ≈ 164 MB. All sourced via the Toronto / open.canada.ca CKAN APIs and direct StatsCan/Metrolinx/Ontario URLs — no browser automation required.
+
+See [Agent Tools §7 — Build phases](agent-tools.md#7-build-phases-grounded-in-whats-already-in-data) for which tools each remaining dataset unblocks.

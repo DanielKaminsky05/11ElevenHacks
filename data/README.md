@@ -7,17 +7,34 @@ Toronto open-data sources, organized by theme. Original download filenames are n
 - `ttc-streetcar-delay-2025.csv` — TTC streetcar delay records, 2025 (was `TTC Streetcar Delay Data since 2025.csv`)
 - `ttc-ridership-analysis-1985-2019.xlsx` — ridership analysis 1985–2019 (was `1985-2019 Analysis of ridership (1).xlsx`)
 - `ttc-routes-schedules-gtfs/` — TTC routes & schedules, GTFS feed (extracted from `TTC Routes and Schedules Data (1).zip`)
+- `go-transit-gtfs/` — Metrolinx / GO Transit regional GTFS feed (Metrolinx Open Data, OGL–Ontario)
 
 ## bikeshare/
 - `ridership-2025/` — Bike Share Toronto ridership, 2025 (extracted from `bikeshare-ridership-2025.zip`)
 
 ## geospatial/
 - `toronto-centreline.geojson` — street/path centreline, EPSG:4326 (was `Centreline - Version 2 - 4326.geojson`)
-- `areas.geojson` — area boundaries (was `Areas - 4326.geojson`)
+- `areas.geojson` — transit-related area boundaries, 37 features (was `Areas - 4326.geojson`); NOT the 158 neighbourhoods — see `neighbourhoods-158.geojson`
 - `pedestrian-crossovers.geojson` — pedestrian crossovers (was `Pedestrian Crossover - 4326.geojson`)
 - `red-light-cameras.geojson` — red light camera locations (was `Red Light Cameras Data - 4326.geojson`)
 - `transit-stations.geojson` — stations (was `Stations - 4326.geojson`)
 - `traffic-beacons.geojson` — traffic beacons (was `Traffic Beacon - 4326.geojson`)
+- `neighbourhoods-158.geojson` — City of Toronto Neighbourhoods, 158-model polygons, EPSG:4326 (Toronto Open Data)
+- `pedestrian-network.geojson` — pedestrian/walk network graph, EPSG:4326 (Toronto Open Data)
+- `intersection-file.geojson` — all road intersections, EPSG:4326 (Toronto Open Data)
+- `address-points.geojson` — One Address Repository, ~500k municipal address points, EPSG:4326 (Toronto Open Data; ~562 MB)
+- `neighbourhood-improvement-areas.geojson` — equity designation polygons (Toronto Open Data)
+- `priority-investment-neighbourhoods/` — Priority Investment Neighbourhoods shapefile (Toronto Open Data)
+- `ontario-road-network/` — Ontario Road Network (ORN) Road Net Element, file geodatabase (Geospatial Ontario, OGL–Ontario; ~1.1 GB)
+
+## census-demographics/ (continued)
+- `wellbeing-civics-equity-indicators.xlsx` — Wellbeing Toronto civics & equity indicators (Toronto Open Data)
+- `on-marg-2021-ontario-DA.xlsx` — Ontario Marginalization Index 2021, all-Ontario DA level (Public Health Ontario; research/non-commercial use)
+- `on-marg-2021-toronto-n158.xlsx` — ON-Marg 2021 quintiles for Toronto neighbourhoods (PHO)
+- `census-profile-2021-census-tracts/` — StatsCan Census Profile 2021, Census Tract level, CSV (98-401-X2021007; ~2.5 GB extracted)
+- `census-profile-2021-cma/` — StatsCan Census Profile 2021, CMA/CA level, CSV (98-401-X2021002)
+- `statcan-2021-da-boundaries/` — StatsCan 2021 Dissemination Area cartographic boundary shapefile (lda_000a21a_e)
+- `spatial-access-measures-2024/` — StatsCan Spatial Access Measures 2024 (transit peak/offpeak, walking, cycling accessibility CSVs)
 
 ## traffic/
 - `traffic-signals.csv` — traffic signal locations & attributes, 2,545 point records with `geometry` (was `139e5357-0caf-4c9a-a6be-ce94d38bcfeb.csv`, a CKAN resource UUID)
