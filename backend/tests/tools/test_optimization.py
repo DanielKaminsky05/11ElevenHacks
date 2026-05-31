@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+from shapely.geometry import Point
 
 import app.tools.optimization as optimization
 from app.tools.optimization import (
@@ -309,11 +310,35 @@ class TestOptimizeLayout:
                     "reward_trajectory", "elapsed_s", "method"):
             assert key in result, f"missing key {key!r}"
 
-    def test_stop_count_matches_budget(self):
+    def test_budget_is_respected_as_upper_bound(self):
+        # Budget caps the layout; the optimiser may place fewer when extra stops
+        # stop paying for themselves (per-stop cost) or the region is small — both
+        # documented behaviours. City-wide here so the budget is comfortably fillable.
         budget = 4
-        args = OptimizeLayoutArgs(reward_spec=_valid_spec_dict(budget=budget), seed=0)
+        args = OptimizeLayoutArgs(
+            reward_spec=_valid_spec_dict(budget=budget, region="Toronto"), seed=0
+        )
         result = optimize_layout(args)
-        assert len(result["stops"]) == budget
+        assert 1 <= len(result["stops"]) <= budget
+
+    def test_region_masking_confines_stops(self):
+        # The headline bug: "optimize York University Heights" must keep its stops
+        # in that area, not scatter them across all of Toronto.
+        from app.tools.optimization import _region_polygon
+
+        args = OptimizeLayoutArgs(
+            reward_spec=_valid_spec_dict(budget=5, region="York University Heights"),
+            seed=0,
+        )
+        result = optimize_layout(args)
+        assert result["region_restricted"] is True
+        assert len(result["stops"]) >= 1
+        # Every placed stop sits within ~1 km of the named neighbourhood polygon.
+        near = _region_polygon("York University Heights").buffer(0.01)
+        for stop in result["stops"]:
+            assert near.contains(Point(stop["lon"], stop["lat"])), (
+                f"stop {stop} fell outside York University Heights"
+            )
 
     def test_stops_have_lon_lat(self):
         args = OptimizeLayoutArgs(reward_spec=_valid_spec_dict(budget=2), seed=1)

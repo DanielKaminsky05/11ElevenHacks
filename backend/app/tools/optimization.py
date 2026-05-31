@@ -217,6 +217,79 @@ def _logical_candidate_cells() -> tuple[tuple[int, int], ...]:
 
 
 # ---------------------------------------------------------------------------
+# Region masking — confine placement to the area the planner actually named
+# ---------------------------------------------------------------------------
+
+# Names that mean "the whole city" → no spatial restriction.
+_CITYWIDE_REGION_NAMES = frozenset(
+    {"", "toronto", "city of toronto", "the city", "city-wide", "citywide", "all"}
+)
+
+# Buffers (degrees ≈ 1.1 km each) tried in turn when a named region is finer than
+# the ~2 km candidate grid and contains too few cell centres on its own.
+_REGION_BUFFER_STEPS_DEG = (0.01, 0.02, 0.04, 0.08)
+
+
+@lru_cache(maxsize=64)
+def _region_polygon(region: str):
+    """Resolve a region/neighbourhood name to its polygon (WGS84), or None.
+
+    None means 'no spatial restriction' — an empty/citywide name, or a name that
+    matches no neighbourhood (better to search the whole city than to error). A
+    district name that matches several neighbourhoods (e.g. 'Scarborough') returns
+    the union of all of them, so the whole district is in scope.
+    """
+    if region.strip().lower() in _CITYWIDE_REGION_NAMES:
+        return None
+    gdf = _load_neighbourhoods()
+    lower = region.strip().lower()
+    mask = gdf["AREA_NAME"].str.lower().str.contains(lower, regex=False)
+    matches = gdf[mask]
+    if matches.empty:
+        return None
+    return unary_union(list(matches.geometry.values))
+
+
+def _region_candidates(
+    region: str, candidates: tuple[tuple[int, int], ...], min_count: int
+) -> tuple[tuple[tuple[int, int], ...], bool]:
+    """Restrict candidate stop cells to those inside the named region.
+
+    Returns (cells, restricted). `restricted` is False when no spatial mask was
+    applied (citywide name, or an unmatched name → search everywhere).
+
+    The candidate grid is coarse (~2 km cells), so a single small neighbourhood
+    can contain too few cell centres to place `min_count` stops. When that happens
+    we grow a buffer around the region until enough cells fall inside — keeping the
+    search local to the area without ever returning fewer candidates than the
+    budget needs. Only if even a generous buffer is too sparse do we fall back to
+    the full city (restricted=False), so the optimiser always has somewhere to go.
+    """
+    poly = _region_polygon(region)
+    if poly is None:
+        return candidates, False
+
+    points = {cell: Point(*_cell_to_lonlat(*cell)) for cell in candidates}
+    target = max(min_count, 3)
+
+    inside = tuple(cell for cell, pt in points.items() if poly.contains(pt))
+    if len(inside) >= target:
+        return inside, True
+
+    for buffer_deg in _REGION_BUFFER_STEPS_DEG:
+        grown = poly.buffer(buffer_deg)
+        near = tuple(cell for cell, pt in points.items() if grown.contains(pt))
+        if len(near) >= target:
+            return near, True
+
+    # Region is too fine even for the widest buffer — keep whatever we found inside
+    # if any, else give up the restriction rather than return nothing to place.
+    if inside:
+        return inside, True
+    return candidates, False
+
+
+# ---------------------------------------------------------------------------
 # Per-cell demand features (grounded in real data)
 # ---------------------------------------------------------------------------
 
@@ -256,10 +329,11 @@ class _GridFeatures:
 def _load_grid_features(resolution: int = _DEMAND_RESOLUTION) -> _GridFeatures:
     """Build (and cache) the per-cell demand features from get_city_grid.
 
-    City-wide demand. NOTE: spec.region is recorded in the output but not yet used
-    to mask demand — the population channel is neighbourhood-coarse, so a sub-city
-    bbox is too sparse to be useful. # TODO: spatial region masking once a finer
-    population raster (census DA) is wired in.
+    Demand stays CITY-WIDE on purpose: a stop placed in a region is still scored
+    against the people and gaps around it (its walkshed doesn't stop at the
+    neighbourhood line). Region targeting is applied where it belongs — masking the
+    *candidate* cells the optimiser may place into (see _region_candidates), not the
+    demand it serves. # TODO: swap to a finer census-DA population raster.
     """
     g = get_city_grid(
         GetCityGridArgs(
@@ -496,16 +570,22 @@ def _stops_lonlat(cells: list[tuple[int, int]]) -> list[dict[str, float]]:
 
 
 def _greedy_search(
-    spec: RewardSpec, seed: int, feats: _GridFeatures
+    spec: RewardSpec,
+    seed: int,
+    feats: _GridFeatures,
+    candidates: tuple[tuple[int, int], ...] | None = None,
 ) -> tuple[list[tuple[int, int]], list[dict[str, Any]], str]:
     """Greedy-add (warm-started from the existing network via access0) then a
     local-search swap pass. Returns (placed_cells, per_step_states, stopped_reason).
+
+    `candidates` overrides the cell set the search may place into (e.g. masked to a
+    named region); defaults to the full city-wide candidate set in `feats`.
 
     Each step state is {stops: [{lon, lat}], R, channel_scores} so the frontend can
     animate the network being built and re-solve on weight change.
     """
     rng = random.Random(seed)
-    cands = list(feats.candidates)
+    cands = list(feats.candidates if candidates is None else candidates)
     rng.shuffle(cands)  # deterministic tie-break order
 
     placed: list[tuple[int, int]] = []
@@ -697,7 +777,16 @@ def optimize_layout(args: OptimizeLayoutArgs) -> dict:
     start = time.time()
 
     feats = _load_grid_features()
-    placed, steps, stopped_reason = _greedy_search(spec, args.seed, feats)
+    # Confine placement to the region the planner named, instead of scattering
+    # stops across all of Toronto (the bug: "optimize York University Heights"
+    # returned stops city-wide). Falls back to citywide if the name is unmatched
+    # or finer than the candidate grid can resolve.
+    region_cands, region_restricted = _region_candidates(
+        spec.region, feats.candidates, min_count=spec.budget
+    )
+    placed, steps, stopped_reason = _greedy_search(
+        spec, args.seed, feats, candidates=region_cands
+    )
 
     final_reward = steps[-1]["R"]
     channel_scores = steps[-1]["channel_scores"]
@@ -709,6 +798,8 @@ def optimize_layout(args: OptimizeLayoutArgs) -> dict:
     result = {
         "job_id": job_id,
         "region": spec.region,
+        "region_restricted": region_restricted,
+        "candidate_count": len(region_cands),
         "budget": spec.budget,
         "stops": [{"lon": float(lon), "lat": float(lat)} for lon, lat in stop_lonlats],
         "stop_cells": [{"row": r, "col": c} for r, c in placed],
