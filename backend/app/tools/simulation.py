@@ -405,7 +405,13 @@ class SimulateChangeArgs(BaseModel):
 
 @tool(SimulateChangeArgs)
 def simulate_change(args: SimulateChangeArgs) -> dict:
-    """Apply stop add/move/remove operations and return before/after accessibility metrics and winners/losers breakdown."""
+    """Predict the effect of a SPECIFIC, user-proposed change (e.g. "add stops on Finch",
+    "remove the King St stop"). Takes explicit add/move/remove operations; returns before/after
+    accessibility metrics and a winners/losers breakdown.
+
+    Use when the planner already has a change in mind ("what if ...", "what happens if we ...").
+    Do NOT use to discover the best change — that is optimize_layout. Do NOT use for current
+    state with no change — that is compute_accessibility / list_transit."""
     baseline_stops = _load_gtfs_stops()
 
     # Before metrics

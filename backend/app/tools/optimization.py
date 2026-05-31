@@ -301,7 +301,13 @@ class OptimizeLayoutArgs(BaseModel):
 
 @tool(OptimizeLayoutArgs)
 def optimize_layout(args: OptimizeLayoutArgs) -> dict:
-    """Search for a stop layout that maximises the given reward spec; returns stop locations and metric trajectory.
+    """Discover the BEST stop layout for a goal the planner does NOT yet have a concrete plan for
+    (e.g. "where should we add stops to help low-income areas"). Returns recommended stop
+    locations and the metric trajectory.
+
+    Use when the planner asks "what should we do" / "where should stops go" / "find the best ...".
+    Do NOT use to evaluate a specific proposed change — that is simulate_change. Requires a reward
+    spec from parse_goal.
 
     CPU fallback: deterministic greedy placement. GPU path uses SB3 PPO/DQN on the Spark.
     """

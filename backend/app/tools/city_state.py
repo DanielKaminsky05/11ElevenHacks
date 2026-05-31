@@ -211,7 +211,10 @@ class GetCityGridArgs(BaseModel):
 
 @tool(GetCityGridArgs)
 def get_city_grid(args: GetCityGridArgs) -> dict:
-    """Rasterize open-data layers into a multi-channel NxN city grid tensor (CPU version)."""
+    """Rasterize open-data layers (population, stops, income, ...) into a multi-channel NxN grid
+    tensor for the map/optimizer. Use for the gridded/spatial view or to feed the optimizer. For
+    one neighbourhood's stats by name use profile_area; to compare named neighbourhoods use
+    compare_areas."""
     bbox = args.bbox or _TORONTO_BBOX
     N = args.resolution
 
@@ -387,7 +390,9 @@ class ProfileAreaArgs(BaseModel):
 
 @tool(ProfileAreaArgs)
 def profile_area(args: ProfileAreaArgs) -> dict:
-    """Return a census and transit dossier for a Toronto neighbourhood by name."""
+    """Return a census + transit dossier (population, income, low-income %, stop count) for ONE
+    Toronto neighbourhood by name. Use for "what is the population of X" / "tell me about X".
+    For multiple areas use compare_areas; for the gridded map view use get_city_grid."""
     row = _find_neighbourhood(args.name)
     if row is None:
         return {
@@ -621,7 +626,9 @@ class CompareAreasArgs(BaseModel):
 
 @tool(CompareAreasArgs)
 def compare_areas(args: CompareAreasArgs) -> dict:
-    """Side-by-side comparison of census and transit metrics across multiple Toronto neighbourhoods."""
+    """Side-by-side comparison of census + transit metrics across MULTIPLE named Toronto
+    neighbourhoods. Use when the planner names two or more areas ("compare X and Y"). For a
+    single area use profile_area."""
     profile_args_metrics = args.metrics  # same metric list reused for each area
     rows: list[dict] = []
     not_found: list[str] = []
