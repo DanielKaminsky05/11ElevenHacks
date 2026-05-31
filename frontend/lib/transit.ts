@@ -77,10 +77,39 @@ export async function loadNetwork(): Promise<NetworkData> {
 export interface RouteProps {
   id: string;
   short: string;
+  long: string;
   mode: TransitMode;
   name: string;
   color: string;
   trips: number;
+}
+
+/** GTFS feed window the `trips` counts are drawn from (for honest labelling). */
+export const SERVICE_PERIOD = { label: "Jun 7–20, 2026", days: 14 };
+
+export type ServiceLevel = "Frequent" | "Standard" | "Infrequent" | "Limited";
+
+export interface RouteSchedule {
+  tripsPerDay: number;
+  /** Approximate headway in minutes, GTFS-derived (both directions, ~18h span). */
+  headwayMin: number;
+  level: ServiceLevel;
+}
+
+/**
+ * Derives an approximate service level from the GTFS trip count. This is an
+ * estimate from total trips over the feed window, NOT a published timetable.
+ */
+export function deriveSchedule(trips: number): RouteSchedule {
+  const tripsPerDay = trips / SERVICE_PERIOD.days;
+  // ~18h service span; trips count both directions, so per-direction = /2.
+  const headwayMin = tripsPerDay > 0 ? Math.round((18 * 60) / (tripsPerDay / 2)) : 0;
+  let level: ServiceLevel;
+  if (tripsPerDay >= 120) level = "Frequent";
+  else if (tripsPerDay >= 50) level = "Standard";
+  else if (tripsPerDay >= 15) level = "Infrequent";
+  else level = "Limited";
+  return { tripsPerDay: Math.round(tripsPerDay), headwayMin, level };
 }
 
 export interface StopProps {
@@ -103,6 +132,7 @@ export function toGeoJSON(data: NetworkData): {
     properties: {
       id: r.id,
       short: r.short,
+      long: r.long,
       mode: r.mode,
       name: `${r.short} ${r.long}`.trim(),
       color: r.color,

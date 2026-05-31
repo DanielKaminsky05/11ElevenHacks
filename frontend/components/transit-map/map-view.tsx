@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl, {
   type ExpressionSpecification,
   type FilterSpecification,
@@ -18,6 +18,7 @@ import {
 } from "@/lib/transit";
 import { MapLegend, type LayerKey, type LegendState } from "./map-legend";
 import { ViewSwitcher } from "./view-switcher";
+import { RouteDetails, type SelectedRoute } from "./route-details";
 import { VIEWS, getView } from "./views/registry";
 import type { LegendSpec } from "./views/types";
 
@@ -55,6 +56,13 @@ export function MapView() {
   const [activeOption, setActiveOption] = useState<string | null>(null);
   const [viewLegend, setViewLegend] = useState<LegendSpec | null>(null);
 
+  // Route selection (click a line to isolate it + see its details).
+  const [selectedRoutes, setSelectedRoutes] = useState<SelectedRoute[]>([]);
+  const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
+  // Map click handlers live in the setup closure; route through a ref so they
+  // always call the latest React state updater.
+  const onRouteClickRef = useRef<(r: SelectedRoute) => void>(() => {});
+
   // Create the map and load the network once on mount.
   useEffect(() => {
     if (mapRef.current || !containerRef.current) return;
@@ -70,6 +78,8 @@ export function MapView() {
       canvasContextAttributes: { antialias: true },
     });
     mapRef.current = map;
+    // Expose for verification scripts (screenshot harness queries rendered features).
+    (window as unknown as { __transitMap?: maplibregl.Map }).__transitMap = map;
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 
     // The map can mount (via next/dynamic) before the container has its final
@@ -177,7 +187,29 @@ export function MapView() {
         },
       });
 
-      wirePopups(map);
+      // Bright white casing under selected routes; filtered to nothing until a
+      // route is clicked. Added above the route lines, then the crisp cores are
+      // moved back on top so the selected route's colour still shows.
+      map.addLayer({
+        id: "routes-highlight",
+        type: "line",
+        source: "routes",
+        filter: ["in", ["get", "id"], ["literal", []]],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": "#ffffff",
+          "line-width": [
+            "interpolate", ["linear"], ["zoom"], 10, 4, 14, 7,
+          ] as ExpressionSpecification,
+          "line-opacity": 0.9,
+          "line-blur": 0.4,
+        },
+      });
+      for (const mode of Object.keys(MODE)) {
+        if (map.getLayer(`${mode}-line`)) map.moveLayer(`${mode}-line`);
+      }
+
+      wireInteractions(map, (r) => onRouteClickRef.current(r));
 
       // Set up every registered overlay view. Each adds its own (hidden)
       // sources/layers; a failure in one view must not break the map.
@@ -236,6 +268,52 @@ export function MapView() {
     setViewLegend(active ? active.legend() : null);
   }, [activeViewId, ready]);
 
+  // Toggle a route in/out of the selection when its line is clicked.
+  const toggleRoute = useCallback((r: SelectedRoute) => {
+    setSelectedRoutes((prev) =>
+      prev.some((x) => x.id === r.id)
+        ? prev.filter((x) => x.id !== r.id)
+        : [...prev, r],
+    );
+    setActiveRouteId((prev) => (prev === r.id ? null : r.id));
+  }, []);
+  onRouteClickRef.current = toggleRoute;
+
+  // Apply selection styling: dim unselected routes, highlight selected ones.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const ids = selectedRoutes.map((r) => r.id);
+    const has = ids.length > 0;
+
+    for (const mode of Object.keys(MODE)) {
+      const glow = `${mode}-glow`;
+      const line = `${mode}-line`;
+      if (!map.getLayer(line)) continue;
+      if (!has) {
+        map.setPaintProperty(glow, "line-opacity", 0.5);
+        map.setPaintProperty(line, "line-opacity", 0.95);
+        continue;
+      }
+      const inSel = ["in", ["get", "id"], ["literal", ids]];
+      map.setPaintProperty(glow, "line-opacity", ["case", inSel, 0.5, 0.06]);
+      map.setPaintProperty(line, "line-opacity", ["case", inSel, 1, 0.1]);
+    }
+    if (map.getLayer("routes-highlight")) {
+      map.setFilter("routes-highlight", ["in", ["get", "id"], ["literal", ids]]);
+    }
+  }, [selectedRoutes, ready]);
+
+  function removeRoute(id: string) {
+    setSelectedRoutes((prev) => prev.filter((x) => x.id !== id));
+    setActiveRouteId((prev) => (prev === id ? null : prev));
+  }
+
+  function clearRoutes() {
+    setSelectedRoutes([]);
+    setActiveRouteId(null);
+  }
+
   function toggleLayer(key: LayerKey) {
     setVisibility((prev) => ({ ...prev, [key]: !prev[key] }));
   }
@@ -278,6 +356,13 @@ export function MapView() {
           legend={viewLegend}
         />
       )}
+      <RouteDetails
+        selected={selectedRoutes}
+        activeId={activeRouteId}
+        onSetActive={setActiveRouteId}
+        onRemove={removeRoute}
+        onClear={clearRoutes}
+      />
     </div>
   );
 }
@@ -328,8 +413,14 @@ function add3DBuildings(map: maplibregl.Map) {
   }
 }
 
-/** Attaches click popups for route lines and bus stops. */
-function wirePopups(map: maplibregl.Map) {
+/**
+ * Wire map interactions: clicking a route line selects it (handled in React via
+ * `onRouteClick`); bus stops keep a lightweight popup.
+ */
+function wireInteractions(
+  map: maplibregl.Map,
+  onRouteClick: (r: SelectedRoute) => void,
+) {
   const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
 
   for (const mode of Object.keys(MODE)) {
@@ -342,11 +433,14 @@ function wirePopups(map: maplibregl.Map) {
     map.on("click", `${mode}-line`, (e: MapLayerMouseEvent) => {
       const p = e.features?.[0]?.properties;
       if (!p) return;
-      const cfg = MODE[p.mode as keyof typeof MODE];
-      popup
-        .setLngLat(e.lngLat)
-        .setHTML(`<b>${p.name}</b><br>${cfg.label} · ${p.trips} trips/period`)
-        .addTo(map);
+      onRouteClick({
+        id: String(p.id),
+        short: String(p.short),
+        long: String(p.long ?? p.name ?? ""),
+        mode: p.mode as SelectedRoute["mode"],
+        color: String(p.color),
+        trips: Number(p.trips) || 0,
+      });
     });
   }
 
