@@ -16,6 +16,7 @@ import {
   loadNetwork,
   toGeoJSON,
 } from "@/lib/transit";
+import { loadNeighbourhoods } from "@/lib/choropleth";
 import { MapLegend, type LayerKey, type LegendState } from "./map-legend";
 import { ViewSwitcher } from "./view-switcher";
 import { RouteDetails, type SelectedRoute } from "./route-details";
@@ -210,6 +211,45 @@ export function MapView() {
       }
 
       wireInteractions(map, (r) => onRouteClickRef.current(r));
+
+      // Neighbourhood name labels — only appear once you've zoomed in closeish
+      // (minzoom 11.5), so the wide city view stays uncluttered. MapLibre places
+      // each label at its polygon's centroid automatically.
+      try {
+        const hoods = await loadNeighbourhoods();
+        if (!cancelled && !map.getSource("nbhd-labels")) {
+          map.addSource("nbhd-labels", { type: "geojson", data: hoods });
+          map.addLayer({
+            id: "nbhd-labels-layer",
+            type: "symbol",
+            source: "nbhd-labels",
+            minzoom: 11.5,
+            layout: {
+              "text-field": ["get", "name"],
+              "text-font": ["Noto Sans Regular"],
+              "text-size": [
+                "interpolate", ["linear"], ["zoom"], 11.5, 11, 13, 15, 15, 19,
+              ] as ExpressionSpecification,
+              "text-max-width": 8,
+              "text-letter-spacing": 0.02,
+              "text-padding": 6,
+              "text-allow-overlap": false,
+            },
+            paint: {
+              "text-color": "#eaf2ff",
+              "text-halo-color": "#0a1628",
+              "text-halo-width": 1.6,
+              "text-halo-blur": 0.4,
+              // Fade the labels in as you zoom past the threshold.
+              "text-opacity": [
+                "interpolate", ["linear"], ["zoom"], 11.5, 0, 12.2, 0.92,
+              ] as ExpressionSpecification,
+            },
+          });
+        }
+      } catch (err) {
+        console.warn("neighbourhood labels unavailable:", err);
+      }
 
       // Set up every registered overlay view. Each adds its own (hidden)
       // sources/layers; a failure in one view must not break the map.
