@@ -106,7 +106,7 @@ export const marginalizationView: ViewModule = {
     const [fillId, outlineId] = addChoroplethLayers(map, {
       fillId: FILL_ID,
       visible: false,
-      fillOpacity: 0.65,
+      fillOpacity: 0.4,
     });
 
     // Apply fixed quintile color expression for the default dimension.
