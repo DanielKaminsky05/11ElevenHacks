@@ -546,6 +546,16 @@ export function MapView() {
       if (!map) return;
       optAnimRef.current?.();
       optAnimRef.current = animateOptimizerStops(map, cmd.steps);
+      // Bring the recommended stops into view so the user actually sees them land,
+      // rather than leaving them off-screen wherever the map happened to be.
+      const finalStops = cmd.steps[cmd.steps.length - 1]?.stops ?? [];
+      if (finalStops.length === 1) {
+        map.flyTo({ center: [finalStops[0].lon, finalStops[0].lat], zoom: 14, duration: 1200 });
+      } else if (finalStops.length > 1) {
+        const bounds = new maplibregl.LngLatBounds();
+        for (const s of finalStops) bounds.extend([s.lon, s.lat]);
+        map.fitBounds(bounds, { padding: 120, maxZoom: 14.5, duration: 1200 });
+      }
     });
     return () => {
       unsubscribe();

@@ -8,6 +8,7 @@ import {
   type ChatMessage,
 } from "@/lib/planner";
 import { emitMapCommand } from "@/lib/map-bus";
+import type { OptStep } from "@/lib/optimizer";
 
 let _idSeq = 0;
 const nextId = () => `m${Date.now()}-${_idSeq++}`;
@@ -152,6 +153,16 @@ export function PlannerChat() {
       // for ordinary questions.
       if (isPlan && planWeights) {
         emitMapCommand({ type: "applyPlan", weights: planWeights, goal: text });
+      }
+      // Plot the agent's recommended stops on the map. optimize_layout returns the
+      // same per-step trajectory the planner's optimizer does, so the map animates
+      // the new stops landing (and flies to them) — this is how you SEE them.
+      if (agentRes.status === "fulfilled") {
+        const optStep = agentRes.value.steps.find((s) => s.tool === "optimize_layout");
+        const optSteps = (optStep?.result as { steps?: OptStep[] } | undefined)?.steps;
+        if (optSteps && optSteps.length > 0) {
+          emitMapCommand({ type: "optimizerResult", steps: optSteps });
+        }
       }
     } catch (err) {
       setMessages((prev) => [
