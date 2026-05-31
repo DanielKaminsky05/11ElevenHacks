@@ -30,21 +30,51 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* ---- MapLibre dark theming (transit map) ---- */
+/* ---- MapLibre dark theming (transit map) ----
+   MapLibre's own stylesheet is imported inside the dynamically-loaded map
+   component, so it can be injected AFTER this file. Use !important so the dark
+   theme always wins regardless of stylesheet order. */
 .maplibregl-popup-content {
-  background: rgba(12, 22, 40, 0.95);
-  color: #e6eefb;
+  background: rgba(12, 22, 40, 0.96) !important;
+  color: #e6eefb !important;
   font-size: 13px;
+  padding: 10px 28px 10px 12px;
   border: 1px solid rgba(120, 170, 255, 0.3);
   border-radius: 8px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
 }
-.maplibregl-popup-tip {
-  border-top-color: rgba(12, 22, 40, 0.95) !important;
+.maplibregl-popup-content strong,
+.maplibregl-popup-content b {
+  color: #ffffff;
 }
+
+/* The tip is a CSS triangle whose colored border depends on the popup's anchor;
+   theme every direction so it's never a stray white wedge. */
+.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+  border-bottom-color: rgba(12, 22, 40, 0.96) !important;
+}
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+  border-top-color: rgba(12, 22, 40, 0.96) !important;
+}
+.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: rgba(12, 22, 40, 0.96) !important;
+}
+.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: rgba(12, 22, 40, 0.96) !important;
+}
+
 .maplibregl-popup-close-button {
-  color: #9fb4d6;
-  font-size: 16px;
+  color: #9fb4d6 !important;
+  font-size: 18px;
+  padding: 0 6px;
+}
+.maplibregl-popup-close-button:hover {
+  background: transparent !important;
+  color: #fff !important;
 }
 .maplibregl-ctrl-attrib {
   background: rgba(12, 22, 40, 0.7) !important;
