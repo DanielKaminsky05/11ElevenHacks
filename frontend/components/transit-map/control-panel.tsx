@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MODE, STOP_COLOR } from "@/lib/transit";
 import {
   CATEGORY_META,
@@ -8,11 +8,38 @@ import {
   loadEvents,
   type CityEvent,
 } from "@/lib/events";
+<<<<<<< HEAD
 import { emitMapCommand } from "@/lib/map-bus";
+=======
+import type { RewardWeights } from "@/lib/planner";
+import { runOptimizer, type OptResult } from "@/lib/optimizer";
+import { emitMapCommand, subscribeMapCommand } from "@/lib/map-bus";
+>>>>>>> origin/main
 import type { LayerKey, LegendState } from "./map-legend";
 import type { ViewModule, LegendSpec } from "./views/types";
 
-type TabId = "network" | "data" | "alerts";
+type TabId = "network" | "data" | "alerts" | "optimize";
+
+const DEFAULT_WEIGHTS: RewardWeights = {
+  coverage: 0.4,
+  travelTime: 0.2,
+  equity: 0.3,
+  constraints: 0.1,
+};
+
+const OPT_CHANNELS: [keyof RewardWeights, string, string][] = [
+  ["coverage", "Coverage", "#38bdf8"],
+  ["travelTime", "Travel time", "#a78bfa"],
+  ["equity", "Equity", "#f472b6"],
+  ["constraints", "Constraints", "#fbbf24"],
+];
+
+const OPT_SCORE_ROWS: [keyof OptResult["channel_scores"], string, string][] = [
+  ["coverage", "Coverage", "#38bdf8"],
+  ["travel", "Travel time", "#a78bfa"],
+  ["equity", "Equity", "#f472b6"],
+  ["constraint", "Constraints", "#fbbf24"],
+];
 
 interface ControlPanelProps {
   // Network tab
@@ -56,9 +83,52 @@ export function ControlPanel(props: ControlPanelProps) {
     [events],
   );
 
+  // --- Optimize tab state: drive the stop-placement optimizer live. ---
+  const [weights, setWeights] = useState<RewardWeights>(DEFAULT_WEIGHTS);
+  const [budget, setBudget] = useState(8);
+  const [optLoading, setOptLoading] = useState(false);
+  const [optError, setOptError] = useState<string | null>(null);
+  const [optResult, setOptResult] = useState<OptResult | null>(null);
+  // Monotonic id so a slow earlier run can't overwrite a newer one.
+  const runSeq = useRef(0);
+
+  const runOpt = useCallback(async (w: RewardWeights, b: number) => {
+    const seq = ++runSeq.current;
+    setOptLoading(true);
+    setOptError(null);
+    try {
+      const res = await runOptimizer({ weights: w, budget: b });
+      if (seq !== runSeq.current) return; // superseded by a newer run
+      setOptResult(res);
+      emitMapCommand({ type: "optimizerResult", steps: res.steps });
+    } catch (err) {
+      if (seq !== runSeq.current) return;
+      setOptError(err instanceof Error ? err.message : "Optimizer failed");
+    } finally {
+      if (seq === runSeq.current) setOptLoading(false);
+    }
+  }, []);
+
+  // When the planner chat infers weights, open the Optimize tab, seed the
+  // sliders, and auto-run so the recommended stops animate onto the map.
+  useEffect(() => {
+    return subscribeMapCommand((cmd) => {
+      if (cmd.type !== "applyPlan") return;
+      setWeights(cmd.weights);
+      setOpen(true);
+      setTab("optimize");
+      void runOpt(cmd.weights, budget);
+    });
+  }, [runOpt, budget]);
+
+  function setWeight(key: keyof RewardWeights, value: number) {
+    setWeights((prev) => ({ ...prev, [key]: value }));
+  }
+
   const TABS: { id: TabId; label: string; icon: React.ReactNode; badge?: number }[] = [
     { id: "network", label: "Network", icon: <NetworkIcon /> },
     { id: "data", label: "Data", icon: <DataIcon /> },
+    { id: "optimize", label: "Optimize", icon: <OptimizeIcon /> },
     { id: "alerts", label: "Alerts", icon: <AlertIcon />, badge: disruptions },
   ];
 
@@ -135,6 +205,18 @@ export function ControlPanel(props: ControlPanelProps) {
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {tab === "network" && <NetworkTab {...props} />}
         {tab === "data" && <DataTab {...props} />}
+        {tab === "optimize" && (
+          <OptimizeTab
+            weights={weights}
+            budget={budget}
+            loading={optLoading}
+            error={optError}
+            result={optResult}
+            onWeight={setWeight}
+            onBudget={setBudget}
+            onRun={() => runOpt(weights, budget)}
+          />
+        )}
         {tab === "alerts" && (
           <AlertsTab events={events} error={eventsError} />
         )}
@@ -485,8 +567,148 @@ function EventCard({ event }: { event: CityEvent }) {
 }
 
 // ---------------------------------------------------------------------------
+// Optimize tab — reward-weight sliders + budget that re-solve stop placement
+// ---------------------------------------------------------------------------
+
+function OptimizeTab({
+  weights,
+  budget,
+  loading,
+  error,
+  result,
+  onWeight,
+  onBudget,
+  onRun,
+}: {
+  weights: RewardWeights;
+  budget: number;
+  loading: boolean;
+  error: string | null;
+  result: OptResult | null;
+  onWeight: (key: keyof RewardWeights, value: number) => void;
+  onBudget: (value: number) => void;
+  onRun: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="text-[11.5px] leading-snug text-[#9fb4d6]">
+        Weight the goals; the optimizer re-solves and animates the recommended
+        stops onto the map.
+      </div>
+
+      {/* Weight sliders */}
+      <div className="space-y-2.5">
+        {OPT_CHANNELS.map(([key, label, color]) => (
+          <div key={key} className="flex items-center gap-2.5 text-[11.5px]">
+            <span className="w-[68px] flex-none text-[#9fb4d6]">{label}</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={weights[key]}
+              onChange={(e) => onWeight(key, Number(e.target.value))}
+              onPointerUp={onRun}
+              onKeyUp={onRun}
+              className="h-1 flex-1 cursor-pointer"
+              style={{ accentColor: color }}
+              aria-label={`${label} weight`}
+            />
+            <span className="w-8 flex-none text-right tabular-nums text-[#cdd9ee]">
+              {weights[key].toFixed(2)}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Budget */}
+      <div className="flex items-center gap-2.5 border-t border-white/10 pt-2.5 text-[11.5px]">
+        <span className="w-[68px] flex-none text-[#9fb4d6]">New stops</span>
+        <input
+          type="range"
+          min={1}
+          max={15}
+          step={1}
+          value={budget}
+          onChange={(e) => onBudget(Number(e.target.value))}
+          onPointerUp={onRun}
+          onKeyUp={onRun}
+          className="h-1 flex-1 cursor-pointer"
+          style={{ accentColor: "#7dd3fc" }}
+          aria-label="Stop budget"
+        />
+        <span className="w-8 flex-none text-right tabular-nums text-[#cdd9ee]">
+          {budget}
+        </span>
+      </div>
+
+      <button
+        type="button"
+        onClick={onRun}
+        disabled={loading}
+        className="w-full rounded-lg bg-sky-500 px-3 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-sky-400 disabled:cursor-not-allowed disabled:bg-sky-500/30 disabled:text-white/50"
+      >
+        {loading ? "Optimizing…" : "Find best layout"}
+      </button>
+
+      {error && (
+        <div className="rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-[11.5px] text-rose-200">
+          {error}
+        </div>
+      )}
+
+      {result && !error && (
+        <div className="space-y-1.5 border-t border-white/10 pt-2.5">
+          <div className="flex items-baseline justify-between">
+            <span className="text-[10px] uppercase tracking-[0.5px] text-[#9fb4d6]">
+              Result
+            </span>
+            <span className="text-[11px] text-[#cdd9ee]">
+              {result.stops.length} stop{result.stops.length === 1 ? "" : "s"}
+              {result.stopped_reason === "diminishing_returns" && (
+                <span className="text-[#7e93b5]"> · capped by per-stop cost</span>
+              )}
+            </span>
+          </div>
+          {OPT_SCORE_ROWS.map(([key, label, color]) => (
+            <div key={key} className="flex items-center gap-2 text-[10.5px]">
+              <span className="w-[68px] flex-none text-[#9fb4d6]">{label}</span>
+              <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+                <span
+                  className="block h-full rounded-full"
+                  style={{
+                    width: `${Math.round(result.channel_scores[key] * 100)}%`,
+                    background: color,
+                  }}
+                />
+              </span>
+              <span className="w-8 flex-none text-right tabular-nums text-[#cdd9ee]">
+                {Math.round(result.channel_scores[key] * 100)}%
+              </span>
+            </div>
+          ))}
+          <div className="pt-0.5 text-[10px] text-[#7e93b5]">
+            % of the best a {result.budget}-stop budget could capture.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tab icons (inline SVG, 16px)
 // ---------------------------------------------------------------------------
+
+function OptimizeIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="2" fill="currentColor" />
+      <circle cx="8" cy="8" r="5.4" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M8 .8v2.2M8 13v2.2M.8 8h2.2M13 8h2.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
 
 function NetworkIcon() {
   return (

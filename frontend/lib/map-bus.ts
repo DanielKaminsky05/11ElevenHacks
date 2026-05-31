@@ -3,6 +3,7 @@
 // next/dynamic boundary. The map subscribes; others emit.
 
 import type { RewardWeights } from "@/lib/planner";
+import type { OptStep } from "@/lib/optimizer";
 
 /** Commands the map knows how to execute. */
 export type MapCommand =
@@ -10,6 +11,12 @@ export type MapCommand =
       type: "applyPlan";
       weights: RewardWeights;
       goal: string;
+    }
+  | {
+      // The optimizer finished; replay these per-step states as the network
+      // builds (stops land one-by-one, and migrate when weights change).
+      type: "optimizerResult";
+      steps: OptStep[];
     }
   | {
       // Fly the camera to a city event (e.g. clicking an alert card) and
