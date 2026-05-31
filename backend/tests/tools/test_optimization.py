@@ -715,7 +715,11 @@ class TestLogicalLocations:
         assert 0 < len(cands) < _GRID_ROWS * _GRID_COLS
 
     def test_every_placed_stop_is_a_logical_site(self):
-        spec = _valid_spec_dict(budget=6)
+        # City-wide search draws from the coarse logical-candidate set (on land,
+        # near the network). A NAMED region instead uses a fine in-polygon grid so
+        # stops land inside the neighbourhood (covered by the region-masking test),
+        # so assert the logical-site guarantee on the unrestricted case.
+        spec = _valid_spec_dict(budget=6, region="Toronto")
         result = optimize_layout(OptimizeLayoutArgs(reward_spec=spec, seed=3))
         cands = set(_logical_candidate_cells())
         for s in result["stop_cells"]:

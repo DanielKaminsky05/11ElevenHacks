@@ -178,6 +178,21 @@ def _cell_to_lonlat(row: int, col: int) -> tuple[float, float]:
     return lon, lat
 
 
+def _lonlat_to_cell(lon: float, lat: float) -> tuple[float, float]:
+    """Inverse of _cell_to_lonlat: map a lon/lat to FRACTIONAL (row, col) on the
+    candidate grid. Fractional indices are valid — _cell_to_lonlat is linear, so the
+    optimiser scores and renders a fractional cell at exactly this lon/lat. This is
+    what lets region candidates be placed anywhere inside a polygon, not just on the
+    coarse ~2 km cell centres."""
+    col = (lon - _TORONTO_GRID_BOUNDS["lon_min"]) / (
+        _TORONTO_GRID_BOUNDS["lon_max"] - _TORONTO_GRID_BOUNDS["lon_min"]
+    ) * _GRID_COLS - 0.5
+    row = (lat - _TORONTO_GRID_BOUNDS["lat_min"]) / (
+        _TORONTO_GRID_BOUNDS["lat_max"] - _TORONTO_GRID_BOUNDS["lat_min"]
+    ) * _GRID_ROWS - 0.5
+    return (row, col)
+
+
 # ---------------------------------------------------------------------------
 # Logical-location candidate filter
 # ---------------------------------------------------------------------------
@@ -232,6 +247,32 @@ _CITYWIDE_REGION_NAMES = frozenset(
 # the ~2 km candidate grid and contains too few cell centres on its own.
 _REGION_BUFFER_STEPS_DEG = (0.01, 0.02, 0.04, 0.08)
 
+# Roughly how many fine candidate points to scatter inside a named region, and the
+# floor on spacing (~275 m). A neighbourhood smaller than one coarse grid cell still
+# gets a dense set of in-polygon sites, so placed stops land INSIDE the area.
+_REGION_FINE_TARGET = 160
+_REGION_FINE_MIN_STEP_DEG = 0.0025
+
+
+def _fine_region_cells(poly) -> tuple[tuple[float, float], ...]:
+    """Fractional (row, col) candidates whose lon/lat fall INSIDE the region polygon.
+
+    The step adapts to the region's size (bounded point count) so a tiny
+    neighbourhood gets a dense in-polygon grid while a large district stays cheap.
+    """
+    minlon, minlat, maxlon, maxlat = poly.bounds
+    width = max(maxlon - minlon, 1e-9)
+    height = max(maxlat - minlat, 1e-9)
+    step = max(
+        _REGION_FINE_MIN_STEP_DEG, math.sqrt(width * height / _REGION_FINE_TARGET)
+    )
+    out: list[tuple[float, float]] = []
+    for lon in np.arange(minlon + step / 2, maxlon, step):
+        for lat in np.arange(minlat + step / 2, maxlat, step):
+            if poly.contains(Point(float(lon), float(lat))):
+                out.append(_lonlat_to_cell(float(lon), float(lat)))
+    return tuple(out)
+
 
 @lru_cache(maxsize=64)
 def _region_polygon(region: str):
@@ -278,6 +319,14 @@ def _region_candidates(
     if poly is None:
         return candidates, False
 
+    # Preferred: a fine grid of sites INSIDE the polygon, so stops land within the
+    # neighbourhood instead of on a coarse ~2 km cell centre that sits just outside.
+    fine = _fine_region_cells(poly)
+    if fine:
+        return fine, True
+
+    # Polygon too thin to catch a fine point — fall back to the coarse cells inside
+    # it, then grow a buffer until we have enough to place the budget.
     points = {cell: Point(*_cell_to_lonlat(*cell)) for cell in candidates}
     target = max(min_count, 3)
 
