@@ -1,10 +1,12 @@
-// Planner chat endpoint.
+// Planner chat endpoint — proxies the browser to the FastAPI backend.
 //
-// Turns a plain-English transit goal into reward weights + a readable reply.
-// This is a deterministic STUB that keyword-maps the goal onto the four reward
-// channels so the UI works end-to-end today. Swap the body of `plan()` for a
-// call to the open model + RL backend when it's available — the request/response
-// contract (PlannerRequest / PlannerResponse) stays the same.
+// The browser calls same-origin `/api/chat` (no CORS); this route forwards to
+// the backend `POST /planner` (TransitRL FastAPI on the Spark). The backend URL
+// comes from BACKEND_URL (server-only env), defaulting to the local dev port.
+//
+// If the backend is unreachable, fall back to a deterministic keyword planner so
+// the UI still works in a frontend-only demo. Both paths return the same
+// PlannerResponse contract (lib/planner.ts).
 
 import { NextResponse } from "next/server";
 import type {
@@ -12,6 +14,8 @@ import type {
   PlannerResponse,
   RewardWeights,
 } from "@/lib/planner";
+
+const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:9000";
 
 function normalize(w: RewardWeights): RewardWeights {
   const total = w.coverage + w.travelTime + w.equity + w.constraints || 1;
@@ -24,8 +28,8 @@ function normalize(w: RewardWeights): RewardWeights {
   };
 }
 
-/** Deterministic keyword planner. Replace with the model/RL call later. */
-function plan(goal: string): PlannerResponse {
+/** Offline fallback: keyword planner mirroring the backend service. */
+function planLocally(goal: string): PlannerResponse {
   const g = goal.toLowerCase();
   const w: RewardWeights = { coverage: 1, travelTime: 1, equity: 1, constraints: 1 };
   const reasons: string[] = [];
@@ -51,14 +55,12 @@ function plan(goal: string): PlannerResponse {
   const reasonText = reasons.length
     ? reasons.join(", ")
     : "balancing coverage, travel time, equity, and constraints";
-
   const reply =
     `Got it — I'll optimize stop placement by ${reasonText}. ` +
     `Translated into reward weights: coverage ${weights.coverage}, ` +
     `travel-time ${weights.travelTime}, equity ${weights.equity}, ` +
     `constraints ${weights.constraints}. ` +
     `Run the agent to watch it relocate stops toward this goal.`;
-
   return { reply, weights };
 }
 
@@ -75,6 +77,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing goal" }, { status: 400 });
   }
 
-  const result: PlannerResponse = plan(goal);
-  return NextResponse.json(result);
+  // Prefer the real backend; fall back to the local planner if it's down.
+  try {
+    const res = await fetch(`${BACKEND_URL}/planner`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal, history: body.history ?? [] }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as PlannerResponse;
+      return NextResponse.json(data);
+    }
+  } catch {
+    // Backend unreachable — fall through to the local planner.
+  }
+
+  return NextResponse.json(planLocally(goal));
 }
