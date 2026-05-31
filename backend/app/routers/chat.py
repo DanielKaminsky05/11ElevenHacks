@@ -56,6 +56,9 @@ SYSTEM_PROMPT = (
     "region and budget=N. Naming an area and a count is ENOUGH: the weights default to a "
     "balanced mix, so do NOT ask for a 'priority goal', weights, or 'budget constraints' "
     "— set non-default weights only if the user stated a priority (e.g. 'for low-income'). "
+    "'Add N stops' ALWAYS means place N NEW stops via optimize_layout — existing stops in "
+    "the area don't change this, so never pause to ask 'optimize existing or add new'; just "
+    "call optimize_layout. Do NOT call profile_area first for an add-stops request. "
     "Use simulate_change ONLY when the user gives specific stop locations or operations to "
     "evaluate.\n"
     "- Finding gaps/deserts -> the diagnostics tools (equity_gap_report, "
@@ -121,6 +124,31 @@ _TOOLCALL_RE = re.compile(
 )
 
 
+def _loads_tolerant(block: str) -> Any:
+    """Parse a JSON block, tolerating the trailing junk Nemotron sometimes appends
+    (e.g. an extra unbalanced brace). Falls back to decoding the first complete
+    object/array and ignoring whatever follows, so a malformed call still runs."""
+    block = block.strip()
+    try:
+        return json.loads(block)
+    except json.JSONDecodeError:
+        pass
+    start = block.find("{")
+    if start == -1:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(block[start:])
+        return obj
+    except json.JSONDecodeError:
+        return None
+
+
+def _strip_toolcall_markup(content: str) -> str:
+    """Remove any <TOOLCALL>...</TOOLCALL> blocks from user-facing text, so raw
+    tool-call markup never leaks into the reply even when it can't be parsed/run."""
+    return _TOOLCALL_RE.sub("", content or "").strip()
+
+
 def _extract_textual_tool_calls(content: str) -> list[dict] | None:
     """Salvage inline-text tool calls into OpenAI-shaped tool_calls, or None.
 
@@ -131,9 +159,8 @@ def _extract_textual_tool_calls(content: str) -> list[dict] | None:
         return None
     calls: list[dict] = []
     for block in _TOOLCALL_RE.findall(content):
-        try:
-            parsed = json.loads(block.strip())
-        except json.JSONDecodeError:
+        parsed = _loads_tolerant(block)
+        if parsed is None:
             continue
         items = parsed if isinstance(parsed, list) else [parsed]
         for item in items:
@@ -212,7 +239,7 @@ async def _run_chat(req: ChatRequest) -> AsyncIterator[dict]:
         if not tool_calls:
             yield {
                 "type": "done",
-                "reply": msg.get("content") or "",
+                "reply": _strip_toolcall_markup(msg.get("content") or ""),
                 "steps": [s.model_dump() for s in steps],
             }
             return
