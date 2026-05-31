@@ -8,9 +8,13 @@ import {
   loadEvents,
   type CityEvent,
 } from "@/lib/events";
+<<<<<<< HEAD
+import { emitMapCommand } from "@/lib/map-bus";
+=======
 import type { RewardWeights } from "@/lib/planner";
 import { runOptimizer, type OptResult } from "@/lib/optimizer";
 import { emitMapCommand, subscribeMapCommand } from "@/lib/map-bus";
+>>>>>>> origin/main
 import type { LayerKey, LegendState } from "./map-legend";
 import type { ViewModule, LegendSpec } from "./views/types";
 
@@ -499,9 +503,36 @@ function EventCard({ event }: { event: CityEvent }) {
   const color = MAGNITUDE_COLOR[event.impact.magnitude];
   const isDisruption = event.kind === "supply_disruption";
   const lines = event.impact.affected_lines;
+  const hasLocation = event.venue.lat != null && event.venue.lon != null;
+
+  // Clicking a located event flies the map to it and highlights it.
+  function focus() {
+    if (!hasLocation) return;
+    emitMapCommand({
+      type: "focusEvent",
+      eventId: event.id,
+      lng: event.venue.lon as number,
+      lat: event.venue.lat as number,
+    });
+  }
 
   return (
-    <li className="rounded-lg border-l-2 bg-white/[0.03] px-3 py-2" style={{ borderLeftColor: color }}>
+    <li
+      className={`rounded-lg border-l-2 bg-white/[0.03] px-3 py-2 ${
+        hasLocation ? "cursor-pointer hover:bg-white/[0.07]" : ""
+      }`}
+      style={{ borderLeftColor: color }}
+      onClick={focus}
+      role={hasLocation ? "button" : undefined}
+      tabIndex={hasLocation ? 0 : undefined}
+      onKeyDown={(e) => {
+        if (hasLocation && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          focus();
+        }
+      }}
+      title={hasLocation ? "Show on map" : undefined}
+    >
       <div className="flex items-start gap-2">
         <span aria-hidden className="text-[14px] leading-none">{meta.icon}</span>
         <div className="min-w-0 flex-1">
@@ -525,6 +556,9 @@ function EventCard({ event }: { event: CityEvent }) {
                 </span>
               ))}
             </div>
+          )}
+          {hasLocation && (
+            <div className="mt-1 text-[10px] text-sky-300/70">Click to show on map →</div>
           )}
         </div>
       </div>

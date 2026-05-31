@@ -17,6 +17,14 @@ export type MapCommand =
       // builds (stops land one-by-one, and migrate when weights change).
       type: "optimizerResult";
       steps: OptStep[];
+    }
+  | {
+      // Fly the camera to a city event (e.g. clicking an alert card) and
+      // highlight it. Carries the venue location + the event id.
+      type: "focusEvent";
+      eventId: string;
+      lng: number;
+      lat: number;
     };
 
 type Handler = (cmd: MapCommand) => void;
