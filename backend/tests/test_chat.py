@@ -137,3 +137,32 @@ def test_invalid_arguments_surfaced(client, monkeypatch):
     body = client.post("/chat", json={"message": "events?"}).json()
     assert body["reply"] == "Let me try that differently."
     assert body["steps"][0]["result"]["error"] == "invalid arguments"
+
+
+# 7. Grounding — a population question runs profile_area against REAL data -----
+#    Proves the grounding plumbing: when the model calls profile_area, the loop
+#    runs it on the real census data and the real number flows back in the trace.
+#    (Whether the LIVE model reliably *chooses* profile_area is a separate, online
+#    eval — see docs/agent-reliability.md §5.2.)
+def test_population_question_grounds_in_real_data(client, monkeypatch):
+    _patch_nim(
+        monkeypatch,
+        script=[
+            [("profile_area", {"name": "Annex", "metrics": ["population"]})],
+            "The Annex has a population of 29,300 (source: profile_area).",
+        ],
+    )
+    body = client.post("/chat", json={"message": "what's the population of the Annex?"}).json()
+    step = body["steps"][0]
+    assert step["tool"] == "profile_area"
+    assert step["result"]["matched_name"] == "Annex"
+    # The number came from the census file, not the model — that's the whole point.
+    assert step["result"]["metrics"]["population"] == 29300
+
+
+# 8. A greeting takes no tool -------------------------------------------------
+def test_greeting_uses_no_tool(client, monkeypatch):
+    _patch_nim(monkeypatch, script=["Hi! I can analyze Toronto transit coverage, gaps, and equity."])
+    body = client.post("/chat", json={"message": "hi"}).json()
+    assert body["steps"] == []
+    assert "Toronto" in body["reply"]
